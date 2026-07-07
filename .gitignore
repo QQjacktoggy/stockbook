@@ -19,3 +19,6 @@ yarn-error.log*
 
 # Firebase cache
 .firebase/
+
+# Backup files
+stockbook_backup_*.json
