@@ -2367,8 +2367,8 @@ async function onClick(event) {
     if (action === "export-pdf-report") return await exportPdfReport();
     if (action === "email-report-summary") return await emailReportSummary();
     if (action === "export-xls") return await exportExcel();
-    if (action === "firebase-push") return syncToFirebase();
-    if (action === "firebase-pull") return loadFromFirebase();
+    if (action === "firebase-push") return await syncToFirebase();
+    if (action === "firebase-pull") return await loadFromFirebase();
     if (action === "download-backup-file") {
       const rawData = localStorage.getItem(STORAGE_KEY);
       if (!rawData) {
@@ -4420,72 +4420,6 @@ function recomputeLotsMatchesAndRebuy() {
     const sharesToMatch = Math.min(sell.manualMatchedShares || sell.shares, sell.shares);
     sellRemainingSharesMap.set(sell.id, sharesToMatch);
     sellTxMap.set(sell.id, sell);
-  }
-
-  // Phase 1: Short Covering matches (先賣後買 / 放空回補)
-  // Process BUY transactions that specify rebuySellTransactionIds and are marked as REBUY
-  for (const buy of buyTransactions) {
-    const lot = lotBySource.get(buy.id);
-    if (!lot) continue;
-
-    const rebuySellIds = parseRebuySellIds(buy.rebuySellTransactionIds);
-    if (!rebuySellIds.length || buy.buyIntent !== "REBUY") continue;
-
-    let buySharesToMatch = lot.remainingShares;
-    if (buySharesToMatch <= 0) continue;
-
-    for (const sellId of rebuySellIds) {
-      const sell = sellTxMap.get(sellId);
-      if (!sell || buySharesToMatch <= 0) continue;
-      if (lot.brokerAccountId !== sell.brokerAccountId || lot.securityId !== sell.securityId) continue;
-
-      const sellSharesAvailable = sellRemainingSharesMap.get(sell.id) || 0;
-      if (sellSharesAvailable <= 0) continue;
-
-      const matchedShares = Math.min(buySharesToMatch, sellSharesAvailable);
-      if (matchedShares <= 0) continue;
-
-      const buyAmounts = effectiveTransactionAmounts(buy);
-      const sellAmounts = effectiveTransactionAmounts(sell);
-
-      const allocatedBuyGross = roundMoney((lot.costBasisGross || lot.buyPrice * lot.originalShares) * (matchedShares / Math.max(lot.originalShares, 1)));
-      const allocatedSellGross = roundMoney((sellAmounts.grossAmount || sell.price * sell.shares) * (matchedShares / Math.max(sell.shares, 1)));
-      const allocatedBuyFee = roundMoney((lot.allocatedBuyFee || 0) * (matchedShares / Math.max(lot.originalShares, 1)));
-      const allocatedSellFee = roundMoney((sellAmounts.fee || 0) * (matchedShares / Math.max(sell.shares, 1)));
-      const allocatedSellTax = roundMoney((sellAmounts.tax || 0) * (matchedShares / Math.max(sell.shares, 1)));
-
-      const grossProfit = roundMoney(allocatedSellGross - allocatedBuyGross);
-      const netProfit = roundMoney(allocatedSellGross - allocatedSellFee - allocatedSellTax - allocatedBuyGross - allocatedBuyFee);
-
-      matches.push({
-        id: makeId("match"),
-        userId: sell.userId,
-        portfolioId: sell.portfolioId,
-        brokerId: sell.brokerId,
-        brokerAccountId: sell.brokerAccountId,
-        sellTransactionId: sell.id,
-        buyLotId: lot.id,
-        matchedShares,
-        buyPrice: lot.buyPrice,
-        sellPrice: sell.price,
-        buyDate: lot.buyDate,
-        sellDate: sell.tradeDate,
-        grossProfit,
-        allocatedBuyGross,
-        allocatedSellGross,
-        allocatedBuyFee,
-        allocatedSellFee,
-        allocatedSellTax,
-        netProfit,
-        isShortMatch: true,
-        createdAt: nowIso(),
-        updatedAt: nowIso()
-      });
-
-      lot.remainingShares -= matchedShares;
-      sellRemainingSharesMap.set(sell.id, sellSharesAvailable - matchedShares);
-      buySharesToMatch -= matchedShares;
-    }
   }
 
   // Phase 2: Regular Long matches (先買後賣)
