@@ -777,6 +777,7 @@ function renderQuickEntryModal() {
   const entry = state.ui.quickEntry;
   if (!entry?.type) return "";
   const type = normalizeType(entry.type);
+  const isEdit = Boolean(entry.id);
   const isCash = ["DEPOSIT", "WITHDRAW", "INTEREST", "DIVIDEND"].includes(type);
   const requestedAccountId = entry.brokerAccountId || selectedBrokerAccountId();
   const allAccounts = scopedBrokerAccounts();
@@ -785,10 +786,13 @@ function renderQuickEntryModal() {
   const defaultSymbol = String(entry.symbol || getPortfolioSettings().defaultSecurity || "0050").toUpperCase();
   const defaultSecurity = state.securities.find((security) => security.symbol.toUpperCase() === defaultSymbol);
   const defaultName = entry.securityName || defaultSecurity?.name || (defaultSymbol === "0050" ? "元大台灣50" : defaultSymbol);
-  const title = ["INTEREST", "DIVIDEND"].includes(type) ? "收益" : { BUY: "買進", SELL: "賣出", DEPOSIT: "入金", WITHDRAW: "出金" }[type] || "交易";
+  const title = isEdit
+    ? `修改${["INTEREST", "DIVIDEND"].includes(type) ? "收益" : { BUY: "買進", SELL: "賣出", DEPOSIT: "入金", WITHDRAW: "出金" }[type] || "交易"}`
+    : (["INTEREST", "DIVIDEND"].includes(type) ? "收益" : { BUY: "買進", SELL: "賣出", DEPOSIT: "入金", WITHDRAW: "出金" }[type] || "交易");
   return `
     <div class="quick-entry-overlay" role="dialog" aria-modal="true" aria-label="${escapeAttr(title)}">
       <form class="quick-entry-sheet" data-form="quick-entry">
+        <input type="hidden" name="id" value="${escapeAttr(entry.id || "")}" />
         <input type="hidden" name="transactionType" value="${escapeAttr(type)}" />
         <header class="quick-entry-head">
           <div><span>快速記帳</span><strong>${escapeHtml(title)}</strong></div>
@@ -801,7 +805,7 @@ function renderQuickEntryModal() {
         </div>
         <div class="quick-entry-actions">
           <button class="btn" type="button" data-action="close-quick-entry">取消</button>
-          <button class="btn primary" type="submit">儲存${escapeHtml(title)}</button>
+          <button class="btn primary" type="submit">${isEdit ? "確認修改" : `儲存${escapeHtml(title)}`}</button>
         </div>
       </form>
     </div>
@@ -1811,6 +1815,7 @@ function renderInventoryLotActions(lot) {
   return `
     <div class="btn-row lot-actions">
       <button class="btn warn" data-action="sell-lot" data-buy-id="${escapeAttr(lot.buyTransactionId)}">賣出</button>
+      <button class="btn" data-action="edit-transaction" data-id="${escapeAttr(lot.buyTransactionId)}">編輯</button>
       <button class="btn danger" data-action="delete-transaction" data-id="${escapeAttr(lot.buyTransactionId)}">刪除買進</button>
     </div>
   `;
@@ -2292,6 +2297,7 @@ async function onClick(event) {
     if (action === "save-match") return handleSaveMatch(actionButton.dataset.sellId);
     if (action === "edit-match") return handleEditMatch(actionButton.dataset.sellId);
     if (action === "cancel-edit-match") return handleCancelEditMatch(actionButton.dataset.sellId);
+    if (action === "edit-transaction") return handleEditTransaction(actionButton.dataset.id);
     if (action === "delete-transaction") return handleDeleteTransaction(actionButton.dataset.id);
     if (action === "delete-import-batch") return handleDeleteImportBatch(actionButton.dataset.id);
     if (action === "sell-lot") return handleSellLot(actionButton.dataset.buyId);
@@ -2757,6 +2763,82 @@ async function handleQuickEntrySubmit(data) {
   const portfolioId = selectedPortfolioId();
   const account = state.brokerAccounts.find((item) => item.id === data.brokerAccountId && item.portfolioId === portfolioId);
   if (!account) throw new Error("請先選擇券商帳戶");
+
+  const isEdit = Boolean(data.id);
+
+  if (isEdit) {
+    const ok1 = window.confirm("您確定要修改此筆交易紀錄嗎？");
+    if (!ok1) return;
+    const ok2 = window.confirm("修改交易將會重新計算所有庫存與損益，請再次確認！");
+    if (!ok2) return;
+
+    const tx = state.appTransactions.find((t) => t.id === data.id);
+    if (!tx) throw new Error("找不到要修改的交易");
+    const oldTx = clone(tx);
+
+    state.ui.quickEntry = null;
+
+    if (["DEPOSIT", "WITHDRAW", "INTEREST", "DIVIDEND"].includes(type)) {
+      tx.tradeDate = parseDate(data.tradeDate);
+      tx.brokerAccountId = account.id;
+      tx.brokerId = account.brokerId;
+      tx.securityId = ensureSecurity(getPortfolioSettings(portfolioId).defaultSecurity || "0050", "現金").id;
+      tx.price = toNumber(data.amount);
+      tx.shares = 0;
+      tx.fee = 0;
+      tx.tax = 0;
+      tx.strategyCategory = ["INTEREST", "DIVIDEND"].includes(type) ? type : "CORE";
+      tx.linkedBuyTransactionId = "";
+      tx.rebuySellTransactionIds = "";
+      tx.buyIntent = "";
+    } else {
+      const securityForCosts = ensureSecurity(data.symbol, data.securityName);
+      const autoCosts = estimateTradeCosts(type, data.price, data.shares, account.brokerId, securityForCosts);
+      const fee = String(data.fee ?? "").trim() === "" ? autoCosts.fee : toNumber(data.fee);
+      const tax = String(data.tax ?? "").trim() === "" ? autoCosts.tax : toNumber(data.tax);
+      const rebuySellIds = type === "BUY" ? parseRebuySellIds(data.rebuySellTransactionIds) : [];
+      const buyIntent = type === "BUY" ? (rebuySellIds.length ? "REBUY" : String(data.buyIntent || "NEW").toUpperCase()) : "";
+
+      if (type === "BUY" && buyIntent === "REBUY") {
+        if (!rebuySellIds.length) throw new Error("請選擇要回補哪幾筆賣出；如果不是回補，請選新開/加碼。");
+        const tasksBySellId = new Map(state.rebuyTasks.map((task) => [task.sellTransactionId, task]));
+        for (const sellId of rebuySellIds) {
+          const task = tasksBySellId.get(sellId);
+          // For editing, allow selecting the same task even if closed, as long as it's the one we're currently linked to
+          const currentLinked = String(oldTx.rebuySellTransactionIds || "").split(/[,\s]+/).includes(sellId);
+          if (!currentLinked && (!task || rebuyTaskIsArchived(task))) throw new Error("選到的回補任務不存在或已完成，請重新選擇。");
+          if (task.portfolioId !== portfolioId) throw new Error("選到的回補任務不屬於目前帳本，請重新選擇。");
+          if (task.securityId !== securityForCosts.id) throw new Error("選到的回補任務和買入股票不同，請重新選擇。");
+          if (task.brokerAccountId !== account.id) throw new Error("選到的回補任務屬於不同券商帳戶，請切換帳戶或改選。");
+        }
+      }
+
+      tx.tradeDate = parseDate(data.tradeDate);
+      tx.brokerAccountId = account.id;
+      tx.brokerId = account.brokerId;
+      tx.securityId = securityForCosts.id;
+      tx.price = toNumber(data.price);
+      tx.shares = toNumber(data.shares);
+      tx.fee = fee;
+      tx.tax = tax;
+      tx.strategyCategory = buyIntent === "REBUY" ? "REBUY" : data.strategyCategory || (type === "BUY" ? "TRADING" : "LONG_TERM");
+      tx.linkedBuyTransactionId = data.linkedBuyTransactionId || "";
+      tx.rebuySellTransactionIds = buyIntent === "REBUY" ? rebuySellIds.join(",") : "";
+      tx.buyIntent = type === "BUY" ? buyIntent : "";
+    }
+
+    tx.note = String(data.note || "").trim();
+    tx.updatedAt = nowIso();
+
+    const benchmarkFields = await benchmarkFieldsForTransaction(portfolioId, account.id, type, tx.tradeDate);
+    Object.assign(tx, benchmarkFields);
+    normalizeTransaction(tx);
+
+    auditLog("UPDATE", "app_transaction", tx.id, oldTx, tx, portfolioId);
+    commit("交易已修改");
+    return;
+  }
+
   state.ui.quickEntry = null;
   if (["DEPOSIT", "WITHDRAW", "INTEREST", "DIVIDEND"].includes(type)) {
     await handleManualTransaction({
@@ -2810,6 +2892,32 @@ async function handleQuickEntrySubmit(data) {
     note: data.note
   });
   showToast(`${type === "BUY" ? "買進" : "賣出"}已記錄；請記得上傳同日券商交易紀錄對帳。`);
+}
+
+function handleEditTransaction(id) {
+  const tx = state.appTransactions.find((t) => t.id === id);
+  if (!tx) {
+    showToast("找不到該筆交易");
+    return;
+  }
+  const security = securityById(tx.securityId);
+  openQuickEntry(tx.transactionType, {
+    id: tx.id,
+    tradeDate: tx.tradeDate,
+    brokerAccountId: tx.brokerAccountId,
+    symbol: security?.symbol || "",
+    securityName: security?.name || "",
+    price: tx.price,
+    amount: tx.price,
+    shares: tx.shares,
+    fee: tx.fee,
+    tax: tx.tax,
+    strategyCategory: tx.strategyCategory,
+    linkedBuyTransactionId: tx.linkedBuyTransactionId,
+    rebuySellTransactionIds: tx.rebuySellTransactionIds,
+    buyIntent: tx.buyIntent,
+    note: tx.note
+  });
 }
 
 function estimateTradeCosts(type, price, shares, brokerId, security = null) {
@@ -4198,26 +4306,110 @@ function recomputeLotsMatchesAndRebuy() {
   const sellTransactions = state.appTransactions
     .filter((tx) => tx.transactionType === "SELL")
     .sort(sortByDateAsc);
+
+  const sellRemainingSharesMap = new Map();
+  const sellTxMap = new Map();
+  for (const sell of sellTransactions) {
+    const sharesToMatch = Math.min(sell.manualMatchedShares || sell.shares, sell.shares);
+    sellRemainingSharesMap.set(sell.id, sharesToMatch);
+    sellTxMap.set(sell.id, sell);
+  }
+
+  // Phase 1: Short Covering matches (先賣後買 / 放空回補)
+  // Process BUY transactions that specify rebuySellTransactionIds and are marked as REBUY
+  for (const buy of buyTransactions) {
+    const lot = lotBySource.get(buy.id);
+    if (!lot) continue;
+
+    const rebuySellIds = parseRebuySellIds(buy.rebuySellTransactionIds);
+    if (!rebuySellIds.length || buy.buyIntent !== "REBUY") continue;
+
+    let buySharesToMatch = lot.remainingShares;
+    if (buySharesToMatch <= 0) continue;
+
+    for (const sellId of rebuySellIds) {
+      const sell = sellTxMap.get(sellId);
+      if (!sell || buySharesToMatch <= 0) continue;
+      if (lot.brokerAccountId !== sell.brokerAccountId || lot.securityId !== sell.securityId) continue;
+
+      const sellSharesAvailable = sellRemainingSharesMap.get(sell.id) || 0;
+      if (sellSharesAvailable <= 0) continue;
+
+      const matchedShares = Math.min(buySharesToMatch, sellSharesAvailable);
+      if (matchedShares <= 0) continue;
+
+      const buyAmounts = effectiveTransactionAmounts(buy);
+      const sellAmounts = effectiveTransactionAmounts(sell);
+
+      const allocatedBuyGross = roundMoney((lot.costBasisGross || lot.buyPrice * lot.originalShares) * (matchedShares / Math.max(lot.originalShares, 1)));
+      const allocatedSellGross = roundMoney((sellAmounts.grossAmount || sell.price * sell.shares) * (matchedShares / Math.max(sell.shares, 1)));
+      const allocatedBuyFee = roundMoney((lot.allocatedBuyFee || 0) * (matchedShares / Math.max(lot.originalShares, 1)));
+      const allocatedSellFee = roundMoney((sellAmounts.fee || 0) * (matchedShares / Math.max(sell.shares, 1)));
+      const allocatedSellTax = roundMoney((sellAmounts.tax || 0) * (matchedShares / Math.max(sell.shares, 1)));
+
+      const grossProfit = roundMoney(allocatedSellGross - allocatedBuyGross);
+      const netProfit = roundMoney(allocatedSellGross - allocatedSellFee - allocatedSellTax - allocatedBuyGross - allocatedBuyFee);
+
+      matches.push({
+        id: makeId("match"),
+        userId: sell.userId,
+        portfolioId: sell.portfolioId,
+        brokerId: sell.brokerId,
+        brokerAccountId: sell.brokerAccountId,
+        sellTransactionId: sell.id,
+        buyLotId: lot.id,
+        matchedShares,
+        buyPrice: lot.buyPrice,
+        sellPrice: sell.price,
+        buyDate: lot.buyDate,
+        sellDate: sell.tradeDate,
+        grossProfit,
+        allocatedBuyGross,
+        allocatedSellGross,
+        allocatedBuyFee,
+        allocatedSellFee,
+        allocatedSellTax,
+        netProfit,
+        isShortMatch: true,
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      });
+
+      lot.remainingShares -= matchedShares;
+      sellRemainingSharesMap.set(sell.id, sellSharesAvailable - matchedShares);
+      buySharesToMatch -= matchedShares;
+    }
+  }
+
+  // Phase 2: Regular Long matches (先買後賣)
   for (const sell of sellTransactions) {
     const sellAmounts = effectiveTransactionAmounts(sell);
     const linkedIds = String(sell.linkedBuyTransactionId || "")
       .split(/[,\s]+/)
       .map((item) => item.trim())
       .filter(Boolean);
-    let sharesToMatch = Math.min(sell.manualMatchedShares || sell.shares, sell.shares);
+
+    let sharesToMatch = sellRemainingSharesMap.get(sell.id);
+    if (sharesToMatch === undefined) sharesToMatch = sell.shares;
+    if (sharesToMatch <= 0) continue;
+
     for (const linkedId of linkedIds) {
       const lot = lotBySource.get(linkedId);
       if (!lot || sharesToMatch <= 0) continue;
       if (lot.brokerAccountId !== sell.brokerAccountId || lot.securityId !== sell.securityId) continue;
+
       const matchedShares = Math.min(sharesToMatch, lot.remainingShares);
       if (matchedShares <= 0) continue;
+
       const allocatedBuyGross = roundMoney((lot.costBasisGross || lot.buyPrice * lot.originalShares) * (matchedShares / Math.max(lot.originalShares, 1)));
       const allocatedSellGross = roundMoney((sellAmounts.grossAmount || sell.price * sell.shares) * (matchedShares / Math.max(sell.shares, 1)));
       const allocatedBuyFee = roundMoney((lot.allocatedBuyFee || 0) * (matchedShares / Math.max(lot.originalShares, 1)));
       const allocatedSellFee = roundMoney((sellAmounts.fee || 0) * (matchedShares / Math.max(sell.shares, 1)));
       const allocatedSellTax = roundMoney((sellAmounts.tax || 0) * (matchedShares / Math.max(sell.shares, 1)));
+
       const grossProfit = roundMoney(allocatedSellGross - allocatedBuyGross);
       const netProfit = roundMoney(allocatedSellGross - allocatedSellFee - allocatedSellTax - allocatedBuyGross - allocatedBuyFee);
+
       matches.push({
         id: makeId("match"),
         userId: sell.userId,
@@ -4241,8 +4433,10 @@ function recomputeLotsMatchesAndRebuy() {
         createdAt: nowIso(),
         updatedAt: nowIso()
       });
+
       lot.remainingShares -= matchedShares;
       sharesToMatch -= matchedShares;
+      sellRemainingSharesMap.set(sell.id, sharesToMatch);
     }
   }
 
@@ -4744,18 +4938,71 @@ async function runFirebaseAutoSync() {
     firebaseAutoSyncInFlight = false;
   }
 }
+// Gzip compression and decompression helper functions
+async function compressText(text) {
+  const stream = new Blob([text]).stream();
+  const compressedStream = stream.pipeThrough(new CompressionStream("gzip"));
+  const response = new Response(compressedStream);
+  const blob = await response.blob();
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result.split(',')[1]);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function decompressText(base64) {
+  const res = await fetch(`data:application/octet-stream;base64,${base64}`);
+  const blob = await res.blob();
+  const decompressedStream = blob.stream().pipeThrough(new DecompressionStream("gzip"));
+  const response = new Response(decompressedStream);
+  return await response.text();
+}
+
 async function syncToFirebase(options = {}) {
   const runtime = await getFirebaseRuntime();
   requireFirebaseUser(runtime);
   const namespace = firebaseNamespace();
+
+  const stateData = exportCurrentUserState();
+  const stateStr = JSON.stringify(stateData);
+  const compressedBase64 = await compressText(stateStr);
+
+  const chunkSize = 800000; // 800KB chunk size
+  const chunks = [];
+  for (let i = 0; i < compressedBase64.length; i += chunkSize) {
+    chunks.push(compressedBase64.slice(i, i + chunkSize));
+  }
+
   const ref = runtime.doc(runtime.db, "stockLedgers", namespace);
   await runtime.setDoc(ref, {
     namespace,
     ownerUid: runtime.auth.currentUser.uid,
     ownerEmail: currentUser().email,
     updatedAt: nowIso(),
-    state: exportCurrentUserState()
+    chunkCount: chunks.length,
+    isCompressed: true
   });
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkRef = runtime.doc(runtime.db, "stockLedgers", namespace, "chunks", `chunk_${i}`);
+    await runtime.setDoc(chunkRef, {
+      index: i,
+      data: chunks[i],
+      updatedAt: nowIso()
+    });
+  }
+
+  // Clean up any old chunks from prior syncs
+  for (let i = chunks.length; i < chunks.length + 15; i++) {
+    const leftoverRef = runtime.doc(runtime.db, "stockLedgers", namespace, "chunks", `chunk_${i}`);
+    try {
+      await runtime.deleteDoc(leftoverRef);
+    } catch (e) {
+      // Ignore errors if chunk does not exist
+    }
+  }
+
   state.settings.firebase.lastSyncAt = nowIso();
   state.settings.firebase.status = "SYNCED";
   persist();
@@ -4770,7 +5017,38 @@ async function loadFromFirebase() {
   const ref = runtime.doc(runtime.db, "stockLedgers", namespace);
   const snapshot = await runtime.getDoc(ref);
   if (!snapshot.exists()) throw new Error("Firebase 找不到這個 namespace");
-  const remote = snapshot.data().state;
+
+  const mainData = snapshot.data();
+  let remote;
+
+  if (mainData.state) {
+    // Legacy format: raw state stored in main doc
+    remote = mainData.state;
+  } else {
+    // New format: chunked & compressed
+    const chunkCount = mainData.chunkCount || 0;
+    if (chunkCount <= 0) throw new Error("Firebase 帳本資料無效或區塊數量為0");
+
+    const chunkPromises = [];
+    for (let i = 0; i < chunkCount; i++) {
+      const chunkRef = runtime.doc(runtime.db, "stockLedgers", namespace, "chunks", `chunk_${i}`);
+      chunkPromises.push(runtime.getDoc(chunkRef));
+    }
+
+    const chunkSnapshots = await Promise.all(chunkPromises);
+    let compressedBase64 = "";
+    for (let i = 0; i < chunkCount; i++) {
+      const chunkSnap = chunkSnapshots[i];
+      if (!chunkSnap.exists()) {
+        throw new Error(`同步載入失敗：缺少資料區塊 ${i}`);
+      }
+      compressedBase64 += chunkSnap.data().data || "";
+    }
+
+    const decompressedStr = await decompressText(compressedBase64);
+    remote = JSON.parse(decompressedStr);
+  }
+
   mergeCurrentUserState(remote);
   state.settings.firebase.lastSyncAt = nowIso();
   state.settings.firebase.status = "SYNCED";
@@ -5852,7 +6130,7 @@ function renderTransactionsTable(rows) {
         net: fmtMoney(amounts.netAmount),
         source: escapeHtml(transactionSourceLabel(tx)),
         status: statusPill(transactionReconStatus(tx.id)),
-        action: `<button class="btn danger" data-action="delete-transaction" data-id="${tx.id}">刪除</button>`,
+        action: `<button class="btn" data-action="edit-transaction" data-id="${tx.id}">編輯</button><button class="btn danger" data-action="delete-transaction" data-id="${tx.id}">刪除</button>`,
         _mobile: renderTransactionMobileRow(tx, amounts)
       };
     }),
@@ -5956,7 +6234,7 @@ function transactionSourceLabel(tx) {
 }
 function renderTransactionMobileRow(tx, amounts) {
   const status = transactionReconStatus(tx.id);
-  const action = `<button class="btn danger" data-action="delete-transaction" data-id="${tx.id}">刪除</button>`;
+  const action = `<button class="btn" data-action="edit-transaction" data-id="${tx.id}">編輯</button><button class="btn danger" data-action="delete-transaction" data-id="${tx.id}">刪除</button>`;
   return `
     <details class="mobile-transaction-row">
       <summary>
