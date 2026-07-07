@@ -2183,8 +2183,14 @@ function renderSettings() {
           </div>
         </div>
         <div class="field full" style="margin-top: 16px; padding: 12px; border: 1px dashed #10b981; border-radius: 8px; background: rgba(16, 185, 129, 0.05);">
-          <label style="color: #10b981; font-weight: bold; display: block; margin-bottom: 6px;">📋 本機帳本備份 (防丟失專用)</label>
-          <p style="font-size: 12px; color: #64748b; margin-bottom: 8px;">如果按「同步」沒有反應，請直接【長按並全選】下方框框內的文字，複製並貼給開發助理：</p>
+          <label style="color: #10b981; font-weight: bold; display: block; margin-bottom: 6px;">📋 本機帳本備份/還原 (防丟失專用)</label>
+          <p style="font-size: 12px; color: #64748b; margin-bottom: 8px;">建議在手機上下載備份檔儲存，您也可以在電腦上匯入此檔案進行還原：</p>
+          <div class="btn-row" style="margin-bottom: 12px;">
+            <button class="btn" type="button" style="background: #10b981; color: white;" data-action="download-backup-file">📥 下載本機 JSON 備份檔</button>
+            <button class="btn" type="button" style="background: #6366f1; color: white;" data-action="trigger-import-file">📤 匯入 JSON 備份檔</button>
+            <input type="file" id="backup-file-import-input" style="display: none;" accept=".json" />
+          </div>
+          <p style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">如果您無法下載，可長按下方框內文字手動複製：</p>
           <textarea readonly style="width: 100%; height: 120px; font-family: monospace; font-size: 10px; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px; background: white; color: #334155;" onclick="this.select(); this.setSelectionRange(0, 99999);">${escapeHtml(localStorage.getItem(STORAGE_KEY) || "")}</textarea>
         </div>
       </form>
@@ -2363,6 +2369,50 @@ async function onClick(event) {
     if (action === "export-xls") return await exportExcel();
     if (action === "firebase-push") return syncToFirebase();
     if (action === "firebase-pull") return loadFromFirebase();
+    if (action === "download-backup-file") {
+      const rawData = localStorage.getItem(STORAGE_KEY);
+      if (!rawData) {
+        showToast("本機沒有找到任何資料暫存！");
+        return;
+      }
+      const blob = new Blob([rawData], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `stockbook_backup_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast("備份檔案已成功下載！");
+      return;
+    }
+    if (action === "trigger-import-file") {
+      const fileInput = document.getElementById("backup-file-import-input");
+      if (!fileInput) return;
+      fileInput.onchange = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          try {
+            const parsed = JSON.parse(event.target.result);
+            const normalized = normalizeState(parsed);
+            state = normalized;
+            persist();
+            recomputeAll();
+            render();
+            showToast("成功匯入 JSON 備份檔案！");
+          } catch (err) {
+            console.error(err);
+            showToast("匯入失敗，請確認檔案格式是否正確。");
+          }
+        };
+        reader.readAsText(file);
+      };
+      fileInput.click();
+      return;
+    }
     if (action === "copy-backup-json") {
       try {
         const rawData = localStorage.getItem(STORAGE_KEY);
