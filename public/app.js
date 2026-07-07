@@ -2179,6 +2179,7 @@ function renderSettings() {
             <button class="btn primary" type="submit">儲存 Firebase 設定</button>
             <button class="btn blue" type="button" data-action="firebase-push">同步到 Firebase</button>
             <button class="btn" type="button" data-action="firebase-pull">從 Firebase 載入</button>
+            <button class="btn" type="button" style="background: #10b981; color: white;" data-action="copy-backup-json">📋 複製本機 JSON 備份</button>
             <button class="btn danger" type="button" data-action="clear-firebase-settings">清除 Firebase 設定</button>
           </div>
         </div>
@@ -2358,6 +2359,27 @@ async function onClick(event) {
     if (action === "export-xls") return await exportExcel();
     if (action === "firebase-push") return syncToFirebase();
     if (action === "firebase-pull") return loadFromFirebase();
+    if (action === "copy-backup-json") {
+      try {
+        const rawData = localStorage.getItem(STORAGE_KEY);
+        if (!rawData) {
+          showToast("本機沒有找到任何資料暫存！");
+          return;
+        }
+        await navigator.clipboard.writeText(rawData);
+        showToast("已成功複製本機資料到剪貼簿！請將它貼給開發助理備份。");
+      } catch (err) {
+        const rawData = localStorage.getItem(STORAGE_KEY);
+        const tempTextArea = document.createElement("textarea");
+        tempTextArea.value = rawData;
+        document.body.appendChild(tempTextArea);
+        tempTextArea.select();
+        document.execCommand("copy");
+        document.body.removeChild(tempTextArea);
+        showToast("已複製本機資料到剪貼簿（相容模式）！");
+      }
+      return;
+    }
   } catch (error) {
     console.error(error);
     showToast(formatFirebaseError(error));
@@ -5020,6 +5042,7 @@ async function syncToFirebase(options = {}) {
     await runtime.setDoc(chunkRef, {
       index: i,
       data: chunks[i],
+      ownerUid: runtime.auth.currentUser.uid,
       updatedAt: nowIso()
     });
   }
