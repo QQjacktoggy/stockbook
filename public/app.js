@@ -2179,9 +2179,13 @@ function renderSettings() {
             <button class="btn primary" type="submit">儲存 Firebase 設定</button>
             <button class="btn blue" type="button" data-action="firebase-push">同步到 Firebase</button>
             <button class="btn" type="button" data-action="firebase-pull">從 Firebase 載入</button>
-            <button class="btn" type="button" style="background: #10b981; color: white;" data-action="copy-backup-json">📋 複製本機 JSON 備份</button>
             <button class="btn danger" type="button" data-action="clear-firebase-settings">清除 Firebase 設定</button>
           </div>
+        </div>
+        <div class="field full" style="margin-top: 16px; padding: 12px; border: 1px dashed #10b981; border-radius: 8px; background: rgba(16, 185, 129, 0.05);">
+          <label style="color: #10b981; font-weight: bold; display: block; margin-bottom: 6px;">📋 本機帳本備份 (防丟失專用)</label>
+          <p style="font-size: 12px; color: #64748b; margin-bottom: 8px;">如果按「同步」沒有反應，請直接【長按並全選】下方框框內的文字，複製並貼給開發助理：</p>
+          <textarea readonly style="width: 100%; height: 120px; font-family: monospace; font-size: 10px; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px; background: white; color: #334155;" onclick="this.select(); this.setSelectionRange(0, 99999);">${escapeHtml(localStorage.getItem(STORAGE_KEY) || "")}</textarea>
         </div>
       </form>
     </section>
