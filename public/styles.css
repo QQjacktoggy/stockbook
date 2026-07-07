@@ -1693,11 +1693,11 @@ body {
 
 @media (max-width: 860px) {
   .quick-entry-overlay {
-    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+    padding-bottom: calc(50px + env(safe-area-inset-bottom));
   }
 
   .quick-entry-sheet {
-    max-height: calc(100svh - 40px);
+    max-height: calc(100svh - 80px);
     overflow: hidden;
   }
 
@@ -2999,7 +2999,7 @@ td {
 
   .quick-entry-overlay {
     align-items: end;
-    padding: 12px 12px calc(12px + env(safe-area-inset-bottom));
+    padding: 12px 12px calc(50px + env(safe-area-inset-bottom));
     background: rgba(15, 23, 42, 0.22);
   }
 
@@ -3007,7 +3007,7 @@ td {
     width: min(100%, 560px);
     border-radius: 28px 28px 22px 22px;
     padding: 16px;
-    max-height: calc(100svh - 40px);
+    max-height: calc(100svh - 80px);
     overflow: hidden;
   }
 
