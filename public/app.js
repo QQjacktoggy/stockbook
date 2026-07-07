@@ -1630,30 +1630,59 @@ function rebuyGroupStatus(group) {
 
 function renderRebuyTaskTable(tasks, emptyText) {
   return renderTable(
-    [["target", "提醒價"], ["shares", "待回補"], ["security", "股票"], ["sellDate", "賣出日"], ["side", "買/賣"], ["account", "券商帳戶"], ["sellPrice", "賣出價"], ["original", "原賣出"], ["filled", "已回補"], ["fills", "回補來源"], ["count", "筆數"], ["status", "狀態"], ["action", "操作"]],
-    tasks.map((task) => ({
-      sellDate: task.sellDate,
-      side: rebuyTaskSideLabel(task),
-      shares: fmtNum(task.remainingRebuyShares),
-      target: fmtPrice(task.targetRebuyPrice),
-      security: escapeHtml(securityLabel(task.securityId)),
-      account: escapeHtml(accountName(task.brokerAccountId)),
-      sellPrice: task.sellPriceLabel || fmtPrice(task.sellPrice),
-      original: fmtNum(task.sellShares),
-      filled: fmtNum(task.filledShares ?? (task.sellShares - task.remainingRebuyShares)),
-      fills: renderRebuyFillSummary(task),
-      count: task.originalTaskCount ? fmtNum(task.originalTaskCount) : "1",
-      status: statusPill(task.status),
-      _mobile: renderRebuyTaskMobileRow(task),
-      action: rebuyTaskIsArchived(task)
-        ? "-"
-        : `<div class="btn-row"><button class="btn blue" data-action="quick-rebuy-task" data-sell-ids="${escapeAttr((task.sellIds || [task.sellTransactionId]).join(","))}">補回</button><button class="btn" data-action="manual-close-rebuy-group" data-sell-ids="${escapeAttr((task.sellIds || [task.sellTransactionId]).join(","))}">手動關閉</button></div>`
-    })),
+    [
+      ["target", "提醒價"],
+      ["shares", "待回補"],
+      ["security", "股票"],
+      ["sellDate", "賣出日"],
+      ["sellPrice", "賣出價"],
+      ["original", "原賣出"],
+      ["filled", "已回補"],
+      ["fills", "回補來源與明細"],
+      ["brokerPnL", "券商帳務損益"],
+      ["benefit", "策略回補效益"],
+      ["status", "狀態"],
+      ["action", "操作"]
+    ],
+    tasks.map((task) => {
+      const taskIds = task.taskIds || [task.id];
+      const taskFills = state.rebuyFills.filter((fill) => taskIds.includes(fill.rebuyTaskId));
+      const rebuyBenefit = taskFills.reduce((total, fill) => total + (toNumber(task.sellPrice) - toNumber(fill.fillPrice)) * toNumber(fill.filledShares), 0);
+
+      const currentMatches = state.sellMatches.filter((match) => match.sellTransactionId === task.sellTransactionId);
+      const brokerPnL = currentMatches.reduce((total, match) => total + toNumber(match.netProfit), 0);
+
+      const totalFilledShares = taskFills.reduce((total, fill) => total + toNumber(fill.filledShares), 0);
+      const improvePerShare = task.sellShares > 0 ? rebuyBenefit / task.sellShares : 0;
+
+      return {
+        sellDate: task.sellDate,
+        shares: fmtNum(task.remainingRebuyShares),
+        target: fmtPrice(task.targetRebuyPrice),
+        security: escapeHtml(securityLabel(task.securityId)),
+        sellPrice: task.sellPriceLabel || fmtPrice(task.sellPrice),
+        original: fmtNum(task.sellShares),
+        filled: fmtNum(task.filledShares ?? (task.sellShares - task.remainingRebuyShares)),
+        fills: renderRebuyFillSummary(task),
+        brokerPnL: currentMatches.length > 0
+          ? `<span class="${brokerPnL >= 0 ? "positive" : "negative"}">${brokerPnL >= 0 ? "+" : ""}${fmtMoney(brokerPnL)}</span>`
+          : `<span class="muted-text">-</span>`,
+        benefit: totalFilledShares > 0
+          ? `<strong class="positive">+${fmtMoney(rebuyBenefit)}</strong><br><small class="muted-text">降成本: +${improvePerShare.toFixed(2)}元/股</small>`
+          : `<span class="muted-text">-</span>`,
+        status: statusPill(task.status),
+        _mobile: renderRebuyTaskMobileRow(task, brokerPnL, rebuyBenefit, improvePerShare),
+        action: rebuyTaskIsArchived(task)
+          ? "-"
+          : `<div class="btn-row"><button class="btn blue" data-action="quick-rebuy-task" data-sell-ids="${escapeAttr((task.sellIds || [task.sellTransactionId]).join(","))}">補回</button><button class="btn" data-action="manual-close-rebuy-group" data-sell-ids="${escapeAttr((task.sellIds || [task.sellTransactionId]).join(","))}">手動關閉</button></div>`
+      };
+    }),
     emptyText
   );
 }
 
-function renderRebuyTaskMobileRow(task) {
+function renderRebuyTaskMobileRow(task, brokerPnL, rebuyBenefit, improvePerShare) {
+  const hasFills = (task.filledShares ?? (task.sellShares - task.remainingRebuyShares)) > 0;
   return `
     <details class="mobile-transaction-row mobile-table-row rebuy-task-card">
       <summary>
@@ -1668,7 +1697,9 @@ function renderRebuyTaskMobileRow(task) {
         <div><span>原賣出</span><strong>${fmtNum(task.sellShares)}股</strong></div>
         <div><span>已回補</span><strong>${fmtNum(task.filledShares ?? (task.sellShares - task.remainingRebuyShares))}股</strong></div>
         <div><span>券商帳戶</span><strong>${escapeHtml(accountName(task.brokerAccountId))}</strong></div>
-        <div><span>筆數</span><strong>${task.originalTaskCount ? fmtNum(task.originalTaskCount) : "1"}</strong></div>
+        <div><span>券商帳務損益</span><strong class="${brokerPnL >= 0 ? "positive" : "negative"}">${brokerPnL >= 0 ? "+" : ""}${fmtMoney(brokerPnL)}</strong></div>
+        <div><span>策略回補效益</span><strong class="positive">${hasFills ? `+${fmtMoney(rebuyBenefit)}` : "-"}</strong></div>
+        <div><span>降成本改善</span><strong class="positive">${hasFills ? `+${improvePerShare.toFixed(2)} 元 / 股` : "-"}</strong></div>
         <div class="detail-action"><span>操作</span>${rebuyTaskIsArchived(task) ? "-" : `<div class="btn-row"><button class="btn blue" data-action="quick-rebuy-task" data-sell-ids="${escapeAttr((task.sellIds || [task.sellTransactionId]).join(","))}">補回</button><button class="btn" data-action="manual-close-rebuy-group" data-sell-ids="${escapeAttr((task.sellIds || [task.sellTransactionId]).join(","))}">手動關閉</button></div>`}</div>
       </div>
     </details>
