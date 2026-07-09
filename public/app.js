@@ -1302,21 +1302,28 @@ function renderPortfolioSnapshot(portfolioId, brokerAccountId = "ALL", context =
     (!accountScoped || lot.brokerAccountId === brokerAccountId)
   );
   const metrics = portfolioMetrics(portfolioId, brokerAccountId || "ALL");
-  const quotes = inventoryQuoteMetrics(lots);
-  const costBasis = sum(lots.map((lot) => ({ value: remainingCostBasis(lot) })), "value");
-  const currentValue = quotes.hasQuotes ? metrics.cash + quotes.marketValue : metrics.cash + costBasis;
-  const unrealizedClass = quotes.unrealized >= 0 ? "positive" : "negative";
-  const quoteHint = quotes.hasQuotes ? "依最新現價估算" : "尚無現價，暫以庫存成本估算";
+  const valuation = portfolioSnapshotValuation(lots);
+  const currentValue = metrics.cash + valuation.inventoryValue;
   const heldCount = heldSecuritiesForLots(lots).length;
+  const quoteHint = valuation.hasQuotes
+    ? (valuation.hasMissingQuotes ? "部分無現價，缺價用成本" : "依最新現價估算")
+    : "尚無現價，暫以庫存成本估算";
+  const inventoryValueLabel = valuation.hasQuotes && !valuation.hasMissingQuotes ? "庫存市值" : "庫存現值";
   return `
     <section class="portfolio-snapshot ${escapeAttr(context)}">
       <div class="snapshot-heading">
         <div>
           <span class="eyebrow">資產快照</span>
           <h2>${accountScoped ? escapeHtml(accountName(brokerAccountId)) : "全部券商帳戶"}</h2>
-          <p>${escapeHtml(quoteHint)}，現值 = 現金餘額 + 庫存市值。</p>
+          <p>${escapeHtml(quoteHint)}，現值 = 現金餘額 + 庫存現值。</p>
         </div>
         <button class="btn compact-sync-btn" data-action="sync-yahoo-quotes">重抓現價</button>
+      </div>
+      <div class="snapshot-mobile-strip" aria-label="資產快照精簡版">
+        <div class="mobile-snapshot-main"><span>現值</span><strong>${fmtMoney(currentValue)}</strong></div>
+        <div class="mobile-snapshot-chip"><span>餘額</span><strong>${fmtMoney(metrics.cash)}</strong></div>
+        <div class="mobile-snapshot-chip"><span>庫存</span><strong>${fmtNum(metrics.remainingShares)} 股</strong></div>
+        <div class="mobile-snapshot-chip"><span>${inventoryValueLabel}</span><strong>${fmtMoney(valuation.inventoryValue)}</strong></div>
       </div>
       <div class="snapshot-grid">
         <div class="snapshot-card highlight">
@@ -1332,16 +1339,35 @@ function renderPortfolioSnapshot(portfolioId, brokerAccountId = "ALL", context =
         <div class="snapshot-card inventory">
           <span>庫存</span>
           <strong>${fmtNum(metrics.remainingShares)} 股</strong>
-          <small>${fmtNum(heldCount)} 檔股票，成本 ${fmtMoney(costBasis)}</small>
+          <small>${fmtNum(heldCount)} 檔股票</small>
         </div>
         <div class="snapshot-card market">
-          <span>庫存市值</span>
-          <strong>${quotes.hasQuotes ? fmtMoney(quotes.marketValue) : "-"}</strong>
-          <small class="${unrealizedClass}">${quotes.hasQuotes ? `未實現 ${fmtMoney(quotes.unrealized)}` : "請同步現價"}</small>
+          <span>${inventoryValueLabel}</span>
+          <strong>${fmtMoney(valuation.inventoryValue)}</strong>
+          <small>${escapeHtml(quoteHint)}</small>
         </div>
       </div>
     </section>
   `;
+}
+
+function portfolioSnapshotValuation(lots) {
+  return lots.reduce(
+    (totals, lot) => {
+      const valuation = inventoryLotValuation(lot);
+      if (valuation.quote) {
+        totals.hasQuotes = true;
+        totals.quotedMarketValue += valuation.marketValue;
+        totals.inventoryValue += valuation.marketValue;
+      } else {
+        totals.hasMissingQuotes = true;
+        totals.fallbackCost += valuation.costBasis;
+        totals.inventoryValue += valuation.costBasis;
+      }
+      return totals;
+    },
+    { hasQuotes: false, hasMissingQuotes: false, quotedMarketValue: 0, fallbackCost: 0, inventoryValue: 0 }
+  );
 }
 
 function renderPortfolios() {
