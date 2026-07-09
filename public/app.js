@@ -1237,9 +1237,8 @@ function renderDashboard() {
   const accountRows = accountSummaries(portfolioId).filter((row) => !brokerAccountId || row.accountId === brokerAccountId);
   const uploadChecklist = brokerUploadChecklist(portfolioId, brokerAccountId);
   return `
-    <section class="metric-grid">
-      ${metricCard("帳戶現金", fmtMoney(metrics.cash), "teal")}
-      ${metricCard("帳戶持股股數", fmtNum(metrics.remainingShares), "blue")}
+    ${renderPortfolioSnapshot(portfolioId, brokerAccountId, "dashboard")}
+    <section class="metric-grid secondary-metrics">
       ${metricCard("已實現淨利", fmtMoney(metrics.realizedNetProfit), "amber")}
       ${metricCard("待回補股數", fmtNum(metrics.openRebuyShares), "coral")}
       ${metricCard("待上傳交易日", fmtNum(uploadChecklist.filter((row) => row.status === "MISSING_BROKER_UPLOAD").length), "amber")}
@@ -1291,6 +1290,62 @@ function renderDashboard() {
         <button class="btn" data-route="/app/import">前往匯入</button>
       </div>
       ${renderBrokerUploadChecklist(uploadChecklist)}
+    </section>
+  `;
+}
+
+function renderPortfolioSnapshot(portfolioId, brokerAccountId = "ALL", context = "dashboard") {
+  const accountScoped = brokerAccountId && brokerAccountId !== "ALL";
+  const lots = state.buyLots.filter((lot) =>
+    lot.portfolioId === portfolioId &&
+    lot.remainingShares > 0 &&
+    (!accountScoped || lot.brokerAccountId === brokerAccountId)
+  );
+  const metrics = portfolioMetrics(portfolioId, brokerAccountId || "ALL");
+  const quotes = inventoryQuoteMetrics(lots);
+  const costBasis = sum(lots.map((lot) => ({ value: remainingCostBasis(lot) })), "value");
+  const currentValue = quotes.hasQuotes ? metrics.cash + quotes.marketValue : metrics.cash + costBasis;
+  const unrealizedClass = quotes.unrealized >= 0 ? "positive" : "negative";
+  const quoteHint = quotes.hasQuotes ? "依最新現價估算" : "尚無現價，暫以庫存成本估算";
+  const heldCount = heldSecuritiesForLots(lots).length;
+  return `
+    <section class="portfolio-snapshot ${escapeAttr(context)}">
+      <div class="snapshot-heading">
+        <div>
+          <span class="eyebrow">資產快照</span>
+          <h2>${accountScoped ? escapeHtml(accountName(brokerAccountId)) : "全部券商帳戶"}</h2>
+          <p>${escapeHtml(quoteHint)}，現值 = 現金餘額 + 庫存市值。</p>
+        </div>
+        <button class="btn compact-sync-btn" data-action="sync-yahoo-quotes">重抓現價</button>
+      </div>
+      <div class="snapshot-mobile-strip" aria-label="資產快照精簡版">
+        <div class="mobile-snapshot-main"><span>現值</span><strong>${fmtMoney(currentValue)}</strong></div>
+        <div class="mobile-snapshot-chip"><span>餘額</span><strong>${fmtMoney(metrics.cash)}</strong></div>
+        <div class="mobile-snapshot-chip"><span>庫存</span><strong>${fmtNum(metrics.remainingShares)} 股</strong></div>
+        <div class="mobile-snapshot-chip"><span>市值</span><strong>${quotes.hasQuotes ? fmtMoney(quotes.marketValue) : "-"}</strong></div>
+      </div>
+      <div class="snapshot-grid">
+        <div class="snapshot-card highlight">
+          <span>目前現值</span>
+          <strong>${fmtMoney(currentValue)}</strong>
+          <small>${quoteHint}</small>
+        </div>
+        <div class="snapshot-card cash">
+          <span>現金餘額</span>
+          <strong>${fmtMoney(metrics.cash)}</strong>
+          <small>可用資金 / 入出金後餘額</small>
+        </div>
+        <div class="snapshot-card inventory">
+          <span>庫存</span>
+          <strong>${fmtNum(metrics.remainingShares)} 股</strong>
+          <small>${fmtNum(heldCount)} 檔股票，成本 ${fmtMoney(costBasis)}</small>
+        </div>
+        <div class="snapshot-card market">
+          <span>庫存市值</span>
+          <strong>${quotes.hasQuotes ? fmtMoney(quotes.marketValue) : "-"}</strong>
+          <small class="${unrealizedClass}">${quotes.hasQuotes ? `未實現 ${fmtMoney(quotes.unrealized)}` : "請同步現價"}</small>
+        </div>
+      </div>
     </section>
   `;
 }
@@ -1943,20 +1998,8 @@ function renderRebuyFillSummary(task) {
 function renderInventory() {
   const accountFilter = selectedBrokerAccountId();
   const lots = filterInventoryLots(state.buyLots.filter((lot) => lot.portfolioId === selectedPortfolioId())).sort(sortInventoryLotsByPriceDesc);
-  const totalRemaining = sum(lots, "remainingShares");
-  const selectedSecurity = state.ui.inventoryFilterSymbol === "ALL" ? null : securityById(state.ui.inventoryFilterSymbol);
-  const holdingLabel = selectedSecurity ? `${selectedSecurity.symbol} 持股` : "本頁持股";
-  const quoteMetrics = inventoryQuoteMetrics(lots);
-  const metrics = portfolioMetrics(selectedPortfolioId(), accountFilter);
-  const cashTitle = "帳戶現金";
-  const heldSecurities = heldSecuritiesForLots(lots);
   return `
-    <section class="metric-grid">
-      ${metricCard("總市值", quoteMetrics.hasQuotes ? fmtMoney(quoteMetrics.marketValue) : "-", "blue")}
-      ${metricCard("現金餘額", fmtMoney(metrics.cash), "teal")}
-      ${metricCard("今日變動", "-", "violet")}
-      ${metricCard("持股檔數", fmtNum(heldSecurities.length), "amber")}
-    </section>
+    ${renderPortfolioSnapshot(selectedPortfolioId(), accountFilter, "inventory")}
     <section class="section">
       <div class="section-title">
         <div><h2>目前庫存</h2><p>依帳戶顯示目前持股</p></div>
