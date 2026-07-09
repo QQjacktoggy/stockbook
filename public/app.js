@@ -2867,7 +2867,11 @@ function finishFirebaseLogin(firebaseUser) {
   recomputeAll();
   persist();
   navigate("/app/inventory");
-  showToast("已使用 Google 登入");
+  showToast("已使用 Google 登入，正在比對 Firebase 與本機資料...");
+  smartFirebaseSync({ silent: true }).catch((error) => {
+    console.warn(error);
+    showToast(`Firebase 初始同步失敗：${formatFirebaseError(error)}`);
+  });
 }
 
 async function completeGoogleRedirectLogin() {
@@ -3712,14 +3716,21 @@ function handleSellLot(buyTransactionId) {
   const lot = state.buyLots.find((item) => item.buyTransactionId === buyTransactionId || item.sourceTransactionId === buyTransactionId);
   if (!lot || lot.remainingShares <= 0) throw new Error("找不到可賣出的庫存 lot");
   const security = securityById(lot.securityId);
+  const sameInventoryLots = state.buyLots
+    .filter((item) => item.remainingShares > 0 && item.brokerAccountId === lot.brokerAccountId && item.securityId === lot.securityId)
+    .sort((a, b) => {
+      if (a.id === lot.id) return -1;
+      if (b.id === lot.id) return 1;
+      return sortByBuyDateDesc(a, b);
+    });
   openQuickEntry("SELL", {
     brokerAccountId: lot.brokerAccountId,
     symbol: security?.symbol || getPortfolioSettings(lot.portfolioId).defaultSecurity || "0050",
     securityName: security?.name || security?.symbol || "",
     shares: lot.remainingShares,
     strategyCategory: lot.strategyCategory || "LONG_TERM",
-    linkedBuyTransactionId: lot.sourceTransactionId || lot.buyTransactionId,
-    note: `由庫存 ${lot.buyDate} @ ${fmtPrice(lot.buyPrice)} 賣出`
+    linkedBuyTransactionId: sameInventoryLots.map((item) => item.sourceTransactionId || item.buyTransactionId).join(","),
+    note: `由庫存 ${lot.buyDate} @ ${fmtPrice(lot.buyPrice)} 賣出；可直接把股數改大，系統會依已選順序跨多個價位扣庫存`
   });
 }
 
@@ -3988,12 +3999,12 @@ function handleRunReconciliation() {
   runReconciliation();
   persist();
   render();
-  const result = promptBrokerDiffConfirmation("重新對帳發現差異");
+  const result = promptBrokerDiffConfirmation("重新對帳發現差異", "ALL");
   if (result === null) showToast("已重新對帳");
 }
 
 function handleAcceptBrokerDiffs() {
-  const result = promptBrokerDiffConfirmation("採用券商金額");
+  const result = promptBrokerDiffConfirmation("採用券商金額", "ALL");
   if (result === null) showToast("沒有待確認的券商差異");
 }
 
@@ -5128,8 +5139,8 @@ function reconciliationDisplayStatus(link) {
 function reconciliationStatusPill(link) {
   return statusPill(reconciliationDisplayStatus(link));
 }
-function promptBrokerDiffConfirmation(title = "對帳發現差異") {
-  const links = confirmableBrokerDiffLinks(selectedPortfolioId(), accountScopeForRoute());
+function promptBrokerDiffConfirmation(title = "對帳發現差異", brokerAccountId = "ALL") {
+  const links = confirmableBrokerDiffLinks(selectedPortfolioId(), brokerAccountId);
   if (!links.length) return null;
   const totalFeeDiff = roundMoney(sum(links, "diffFee"));
   const totalTaxDiff = roundMoney(sum(links, "diffTax"));
@@ -5419,7 +5430,7 @@ async function runFirebaseAutoSync() {
   }
   firebaseAutoSyncInFlight = true;
   try {
-    await syncToFirebase({ silent: true });
+    await smartFirebaseSync({ silent: true });
   } catch (error) {
     console.error(error);
     state.settings.firebase.status = "SYNC_FAILED";
@@ -5449,6 +5460,52 @@ async function decompressText(base64) {
   const decompressedStream = blob.stream().pipeThrough(new DecompressionStream("gzip"));
   const response = new Response(decompressedStream);
   return await response.text();
+}
+
+function ledgerContentScore(data) {
+  if (!data || typeof data !== "object") return 0;
+  const keys = ["portfolios", "brokerAccounts", "importBatches", "rawImportRows", "appTransactions", "brokerExecutions", "accountTransfers", "positionTransfers", "marketQuotes", "auditLogs", "manualClosedRebuySellIds"];
+  return keys.reduce((total, key) => total + (Array.isArray(data[key]) ? data[key].length : 0), 0) + Object.keys(data.acceptedBrokerDiffs || {}).length;
+}
+
+async function readFirebaseState(runtime, namespace) {
+  const ref = runtime.doc(runtime.db, "stockLedgers", namespace);
+  const snapshot = await runtime.getDoc(ref);
+  if (!snapshot.exists()) return null;
+  const mainData = snapshot.data();
+  if (mainData.state) return mainData.state;
+  const chunkCount = mainData.chunkCount || 0;
+  if (chunkCount <= 0) throw new Error("Firebase 帳本資料無效或區塊數量為0");
+  const chunkSnapshots = await Promise.all(Array.from({ length: chunkCount }, (_, i) => {
+    const chunkRef = runtime.doc(runtime.db, "stockLedgers", namespace, "chunks", `chunk_${i}`);
+    return runtime.getDoc(chunkRef);
+  }));
+  let compressedBase64 = "";
+  for (let i = 0; i < chunkCount; i++) {
+    const chunkSnap = chunkSnapshots[i];
+    if (!chunkSnap.exists()) throw new Error(`同步載入失敗：缺少資料區塊 ${i}`);
+    compressedBase64 += chunkSnap.data().data || "";
+  }
+  return JSON.parse(await decompressText(compressedBase64));
+}
+
+async function smartFirebaseSync(options = {}) {
+  const runtime = await getFirebaseRuntime();
+  requireFirebaseUser(runtime);
+  const namespace = firebaseNamespace();
+  const local = exportCurrentUserState();
+  const remote = await readFirebaseState(runtime, namespace);
+  if (remote && ledgerContentScore(remote) > ledgerContentScore(local)) {
+    mergeCurrentUserState(remote);
+    state.settings.firebase.lastSyncAt = nowIso();
+    state.settings.firebase.status = "SYNCED";
+    persist();
+    render();
+    await syncToFirebase({ silent: true });
+    if (!options.silent) showToast("已以資料較多的 Firebase 版本更新本機，並回寫同步");
+    return;
+  }
+  await syncToFirebase(options);
 }
 
 async function syncToFirebase(options = {}) {
@@ -5507,40 +5564,8 @@ async function loadFromFirebase() {
   const runtime = await getFirebaseRuntime();
   requireFirebaseUser(runtime);
   const namespace = firebaseNamespace();
-  const ref = runtime.doc(runtime.db, "stockLedgers", namespace);
-  const snapshot = await runtime.getDoc(ref);
-  if (!snapshot.exists()) throw new Error("Firebase 找不到這個 namespace");
-
-  const mainData = snapshot.data();
-  let remote;
-
-  if (mainData.state) {
-    // Legacy format: raw state stored in main doc
-    remote = mainData.state;
-  } else {
-    // New format: chunked & compressed
-    const chunkCount = mainData.chunkCount || 0;
-    if (chunkCount <= 0) throw new Error("Firebase 帳本資料無效或區塊數量為0");
-
-    const chunkPromises = [];
-    for (let i = 0; i < chunkCount; i++) {
-      const chunkRef = runtime.doc(runtime.db, "stockLedgers", namespace, "chunks", `chunk_${i}`);
-      chunkPromises.push(runtime.getDoc(chunkRef));
-    }
-
-    const chunkSnapshots = await Promise.all(chunkPromises);
-    let compressedBase64 = "";
-    for (let i = 0; i < chunkCount; i++) {
-      const chunkSnap = chunkSnapshots[i];
-      if (!chunkSnap.exists()) {
-        throw new Error(`同步載入失敗：缺少資料區塊 ${i}`);
-      }
-      compressedBase64 += chunkSnap.data().data || "";
-    }
-
-    const decompressedStr = await decompressText(compressedBase64);
-    remote = JSON.parse(decompressedStr);
-  }
+  const remote = await readFirebaseState(runtime, namespace);
+  if (!remote) throw new Error("Firebase 找不到這個 namespace");
 
   mergeCurrentUserState(remote);
   state.settings.firebase.lastSyncAt = nowIso();
@@ -6585,24 +6610,27 @@ function dailyTransactionReportRows(portfolioId, brokerAccountId = "ALL") {
 
 function profitSummaryReportRows(grain, portfolioId, brokerAccountId = "ALL") {
   const groups = new Map();
-  for (const match of state.sellMatches.filter((item) => item.portfolioId === portfolioId && reportAccountMatches(item, brokerAccountId))) {
-    const key = profitPeriodKey(match.sellDate, grain);
+  const addProfitRow = (date, shares, gross, fees, net) => {
+    const key = profitPeriodKey(date, grain);
     if (!groups.has(key)) {
-      groups.set(key, {
-        period: key,
-        trades: 0,
-        shares: 0,
-        gross: 0,
-        fees: 0,
-        net: 0
-      });
+      groups.set(key, { period: key, trades: 0, shares: 0, gross: 0, fees: 0, net: 0 });
     }
     const row = groups.get(key);
     row.trades += 1;
-    row.shares += toNumber(match.matchedShares);
-    row.gross += toNumber(match.grossProfit);
-    row.fees += toNumber(match.allocatedBuyFee) + toNumber(match.allocatedSellFee) + toNumber(match.allocatedSellTax);
-    row.net += toNumber(match.netProfit);
+    row.shares += toNumber(shares);
+    row.gross += toNumber(gross);
+    row.fees += toNumber(fees);
+    row.net += toNumber(net);
+  };
+  for (const match of state.sellMatches.filter((item) => item.portfolioId === portfolioId && reportAccountMatches(item, brokerAccountId))) {
+    addProfitRow(match.sellDate, match.matchedShares, match.grossProfit, toNumber(match.allocatedBuyFee) + toNumber(match.allocatedSellFee) + toNumber(match.allocatedSellTax), match.netProfit);
+  }
+  const tasksById = new Map(state.rebuyTasks.map((task) => [task.id, task]));
+  for (const fill of state.rebuyFills.filter((item) => item.portfolioId === portfolioId)) {
+    const task = tasksById.get(fill.rebuyTaskId);
+    if (!task || !reportAccountMatches(task, brokerAccountId)) continue;
+    const benefit = roundMoney((toNumber(task.sellPrice) - toNumber(fill.fillPrice)) * toNumber(fill.filledShares));
+    addProfitRow(fill.fillDate, fill.filledShares, benefit, 0, benefit);
   }
   return {
     columns: [
