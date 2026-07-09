@@ -2316,71 +2316,93 @@ function renderCashTransfers() {
     </section>
   `;
 }function renderReports() {
-  const options = [
-    ["transactions", "交易流水"],
-    ["dailyTransactions", "日報交易明細"],
-    ["dailyProfit", "每日獲利"],
-    ["monthlyProfit", "月獲利"],
-    ["quarterlyProfit", "季獲利"],
-    ["yearlyProfit", "年獲利總結"],
-    ["matches", "買賣配對"],
-    ["rebuy", "待回補"],
-    ["borrowRebuy", "借券回補"],
-    ["inventory", "庫存"],
-    ["reconciliation", "券商對帳"],
-    ["accounts", "券商績效"]
-  ];
-  const report = state.ui.report || "transactions";
   return `
     <section class="section">
       <div class="split-toolbar">
-        <div class="section-title" style="margin-bottom:0"><div><h2>報表</h2><p>Portfolio 合併與 Broker Account 分帳</p></div></div>
+        <div class="section-title" style="margin-bottom:0">
+          <div>
+            <h2>0050 操作績效追蹤</h2>
+            <p>以一個主要列表整理每日績效，移除重複的報表切換；入金以次一交易日收盤價 × 0.98 換算被動持有 0050 零股基準。</p>
+          </div>
+        </div>
         <div class="filters">
-          <select id="report-select">${options.map(([value, label]) => `<option value="${value}" ${report === value ? "selected" : ""}>${label}</option>`).join("")}</select>
           <button class="btn blue" data-action="export-pdf-report">匯出 PDF</button>
           <button class="btn" data-action="email-report-summary">Email 摘要</button>
           <button class="btn primary" data-action="export-xls">匯出 Excel</button>
         </div>
       </div>
     </section>
-    ${renderReportPeriodTabs(report)}
     ${renderReportSummaryCards()}
-    ${renderReportChartPreview()}
-    <section class="section">${renderSelectedReport(report)}</section>
-  `;
-}
-
-function renderReportPeriodTabs(report) {
-  const tabs = [
-    ["dailyProfit", "每日"],
-    ["monthlyProfit", "每月"],
-    ["quarterlyProfit", "每季"],
-    ["yearlyProfit", "每年"]
-  ];
-  return `
-    <section class="section report-period-section">
-      <div class="report-period-tabs" role="tablist" aria-label="報表時間區間">
-        ${tabs.map(([value, label]) => `<button type="button" data-action="set-report-preset" data-report="${value}" class="${report === value ? "active" : ""}" role="tab" aria-selected="${report === value ? "true" : "false"}">${label}</button>`).join("")}
-      </div>
-    </section>
+    ${render0050PerformanceReport()}
   `;
 }
 
 function renderReportSummaryCards() {
   const portfolioId = selectedPortfolioId();
   const accountId = reportBrokerAccountId(portfolioId);
-  const metrics = portfolioMetrics(portfolioId, accountId);
-  const lots = state.buyLots.filter((lot) => lot.portfolioId === portfolioId && reportAccountMatches(lot, accountId) && toNumber(lot.remainingShares) > 0);
-  const quoteMetrics = inventoryQuoteMetrics(lots);
-  const assetValue = quoteMetrics.hasQuotes ? metrics.cash + quoteMetrics.marketValue : metrics.cash;
+  const transactions = scopedTransactions(portfolioId).filter((tx) => reportAccountMatches(tx, accountId)).slice().sort(sortByDateAsc);
+  const inventoryLots = state.buyLots.filter((lot) => lot.portfolioId === portfolioId && reportAccountMatches(lot, accountId) && toNumber(lot.remainingShares) > 0);
+  const reportDate = latestReportDate(transactions, state.sellMatches.filter((match) => match.portfolioId === portfolioId && reportAccountMatches(match, accountId)));
+  const benchmark = build0050BenchmarkModel(portfolioId, accountId, transactions, inventoryLots, reportDate);
   return `
     <section class="metric-grid report-summary-grid">
-      ${metricCard("已實現損益", fmtMoney(metrics.realizedNetProfit), metrics.realizedNetProfit >= 0 ? "teal" : "coral")}
-      ${metricCard("未實現損益", quoteMetrics.hasQuotes ? fmtMoney(quoteMetrics.unrealized) : "-", quoteMetrics.unrealized >= 0 ? "teal" : "coral")}
-      ${metricCard("現金", fmtMoney(metrics.cash), "blue")}
-      ${metricCard("帳面資產", fmtMoney(assetValue), "amber")}
+      ${metricCard("操作等值股數", benchmark.reportPrice ? fmtNum(benchmark.operationEquivalentShares, 2) : "-", benchmark.excessShares >= 0 ? "teal" : "coral")}
+      ${metricCard("不操作基準股數", benchmark.reportPrice ? fmtNum(benchmark.passiveShares, 2) : "-", "blue")}
+      ${metricCard("超額股數", benchmark.reportPrice ? fmtNum(benchmark.excessShares, 2) : "-", benchmark.excessShares >= 0 ? "teal" : "coral")}
+      ${metricCard("超額等值", benchmark.reportPrice ? fmtMoney(benchmark.excessValue) : "-", benchmark.excessValue >= 0 ? "teal" : "coral")}
     </section>
   `;
+}
+function render0050PerformanceReport() {
+  try {
+    const model = buildPdfReportModel(selectedPortfolioId(), reportBrokerAccountId());
+    const benchmark = model.benchmark;
+    if (!benchmark?.reportPrice) return `<section class="section"><div class="empty">需要 0050 收盤價或成交價後，才能換算每日等值股數。</div></section>`;
+    const rows = benchmark.dailyRows.length ? benchmark.dailyRows : benchmark.series;
+    return `
+      <section class="two-col report-chart-grid">
+        <div class="section">
+          <div class="section-title"><div><h2>每日追蹤圖表</h2><p>操作後等值股數與不操作買進 0050 基準比較。</p></div></div>
+          ${pdfLineChart(benchmark.series, [{ key: "equivalent", label: "操作等值股數", color: "#0f766e" }, { key: "passive", label: "不操作基準", color: "#2563eb" }, { key: "excess", label: "超額股數", color: "#b45309" }], "shares")}
+        </div>
+        <div class="section">
+          <div class="section-title"><div><h2>計算規則</h2><p>零股價差以 0.98 比例作為保守基準。</p></div><span class="pill">${escapeHtml(benchmark.symbol)}</span></div>
+          <div class="summary-list">
+            <div class="summary-line"><span>報告日基準價</span><strong>${fmtPrice(benchmark.reportPrice)}</strong></div>
+            <div class="summary-line"><span>價格來源</span><strong>${escapeHtml(benchmark.reportPriceSource)}</strong></div>
+            <div class="summary-line"><span>入金換算</span><strong>次一交易日收盤價 × ${fmtNum(benchmark.fractionalShareRatio, 2)}</strong></div>
+            <div class="summary-line"><span>現金也換股</span><strong>${fmtNum(benchmark.cashEquivalentShares, 2)} 股</strong></div>
+          </div>
+        </div>
+      </section>
+      <section class="section">
+        <div class="section-title"><div><h2>主要績效列表</h2><p>每日用剩餘 0050 股數與現金換算成等值股數，和不操作買賣的基準比較。</p></div></div>
+        ${renderTable([
+          ["date", "日期"],
+          ["price", "0050價"],
+          ["actual", "剩餘0050"],
+          ["cash", "現金"],
+          ["cashShares", "現金等值股"],
+          ["equivalent", "操作等值股"],
+          ["passive", "不操作基準"],
+          ["excess", "超額股數"],
+          ["value", "超額等值"]
+        ], rows.map((row) => ({
+          date: escapeHtml(row.fullDate || row.date),
+          price: row.price ? fmtPrice(row.price) : "-",
+          actual: fmtNum(row.actualShares || 0, 2),
+          cash: fmtMoney(row.cash || 0),
+          cashShares: fmtNum(row.cashEquivalentShares || 0, 2),
+          equivalent: fmtNum(row.equivalent || 0, 2),
+          passive: fmtNum(row.passive || 0, 2),
+          excess: `<span class="${toNumber(row.excess) >= 0 ? "positive" : "negative"}">${fmtNum(row.excess || 0, 2)}</span>`,
+          value: `<span class="${toNumber(row.excessValue) >= 0 ? "positive" : "negative"}">${fmtMoney(row.excessValue || 0)}</span>`
+        })), "尚無每日績效資料")}
+      </section>
+    `;
+  } catch (error) {
+    return `<section class="section"><div class="empty">目前沒有足夠資料產生 0050 績效追蹤：${escapeHtml(error.message || error)}</div></section>`;
+  }
 }
 function handleSetReportPreset(reportType) {
   if (!reportType) return;
@@ -2389,23 +2411,7 @@ function handleSetReportPreset(reportType) {
   render();
 }
 function renderReportChartPreview() {
-  try {
-    const model = buildPdfReportModel(selectedPortfolioId(), reportBrokerAccountId());
-    return `
-      <section class="two-col report-chart-grid">
-        <div class="section">
-          <div class="section-title"><div><h2>財產圖表</h2><p>現金與帳面資產走勢</p></div></div>
-          ${pdfLineChart(model.assetSeries, [{ key: "assets", label: "帳面資產", color: "#0f766e" }, { key: "cash", label: "現金", color: "#2563eb" }], "TWD")}
-        </div>
-        <div class="section">
-          <div class="section-title"><div><h2>庫存持有圖表</h2><p>持股股數與待回補股數</p></div></div>
-          ${pdfLineChart(model.holdingSeries, [{ key: "shares", label: "持股", color: "#0f766e" }, { key: "rebuy", label: "待回補", color: "#b45309" }], "shares")}
-        </div>
-      </section>
-    `;
-  } catch {
-    return `<section class="section"><div class="empty">目前沒有足夠資料產生報表圖表</div></section>`;
-  }
+  return render0050PerformanceReport();
 }
 function renderSettings() {
   const settings = getPortfolioSettings();
@@ -5745,18 +5751,7 @@ async function exportExcel() {
   await backfillMissingBenchmarkPrices(selectedPortfolioId(), reportBrokerAccountId());
   const html = `
     <html><head><meta charset="utf-8" /></head><body>
-      ${reportHtmlTable("交易流水", reportRows("transactions"))}
-      ${reportHtmlTable("日報交易明細", reportRows("dailyTransactions"))}
-      ${reportHtmlTable("每日獲利", reportRows("dailyProfit"))}
-      ${reportHtmlTable("月獲利", reportRows("monthlyProfit"))}
-      ${reportHtmlTable("季獲利", reportRows("quarterlyProfit"))}
-      ${reportHtmlTable("年獲利總結", reportRows("yearlyProfit"))}
-      ${reportHtmlTable("買賣配對", reportRows("matches"))}
-      ${reportHtmlTable("待回補", reportRows("rebuy"))}
-      ${reportHtmlTable("借券回補", reportRows("borrowRebuy"))}
-      ${reportHtmlTable("庫存", reportRows("inventory"))}
-      ${reportHtmlTable("券商對帳", reportRows("reconciliation"))}
-      ${reportHtmlTable("券商績效", reportRows("accounts"))}
+      ${reportHtmlTable("0050 操作績效追蹤", reportRows("performance0050"))}
     </body></html>
   `;
   const blob = new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" });
@@ -5882,6 +5877,7 @@ function buildPdfReportModel(portfolioId, brokerAccountId = reportBrokerAccountI
 }
 function build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inventoryLots, reportDate) {
   const security = benchmarkSecurity(portfolioId);
+  const fractionalShareRatio = 0.98;
   const reportPriceInfo = benchmarkPriceForDate(portfolioId, security?.id, reportDate, transactions);
   const reportPrice = toNumber(reportPriceInfo.price);
   const cashFlows = transactions.filter((tx) => ["DEPOSIT", "WITHDRAW"].includes(tx.transactionType)).slice().sort(sortByDateAsc);
@@ -5893,7 +5889,7 @@ function build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inv
     const amounts = effectiveTransactionAmounts(tx);
     const amount = Math.abs(toNumber(amounts.netAmount));
     if (!amount) continue;
-    const priceInfo = benchmarkPriceForDate(portfolioId, security?.id, tx.tradeDate, transactions);
+    const priceInfo = benchmarkPriceForCashFlow(portfolioId, security?.id, tx, transactions);
     const price = toNumber(priceInfo.price || reportPrice);
     if (!price) continue;
     const account = state.brokerAccounts.find((item) => item.id === tx.brokerAccountId);
@@ -5901,7 +5897,7 @@ function build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inv
     const buyCostRate = toNumber(fee.feeRate) * toNumber(fee.discountRate);
     const sellNetRate = Math.max(0.000001, 1 - buyCostRate - securityTaxRate(security, fee));
     const isDeposit = tx.transactionType === "DEPOSIT";
-    const shares = isDeposit ? amount / (price * (1 + buyCostRate)) : amount / (price * sellNetRate);
+    const shares = isDeposit ? (amount * fractionalShareRatio) / (price * (1 + buyCostRate)) : amount / (price * sellNetRate);
     passiveShares += isDeposit ? shares : -shares;
     if (isDeposit) cumulativeDeposit += amount;
     else cumulativeWithdraw += amount;
@@ -5913,7 +5909,7 @@ function build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inv
       shares: isDeposit ? shares : -shares,
       cumulativeShares: passiveShares,
       source: priceInfo.source,
-      note: isDeposit ? "入金日買入" : "出金日賣出等值"
+      note: isDeposit ? "次一交易日收盤價 × 0.98 換算" : "出金日賣出等值"
     });
   }
   const benchmarkLots = inventoryLots.filter((lot) => lot.securityId === security?.id);
@@ -5949,11 +5945,25 @@ function build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inv
     excessRate,
     excessValue,
     equivalentAverageCost,
+    fractionalShareRatio,
     rows,
     series: build0050BenchmarkSeries(portfolioId, transactions, rows, reportDate, reportPrice, security?.id),
+    dailyRows: build0050BenchmarkSeries(portfolioId, transactions, rows, reportDate, reportPrice, security?.id),
     dividendPolicy: "股息現金保留",
-    priceRule: "入金日優先採 APP 內 0050 當日成交價；若無當日價，採最近可用市場報價或報告日現價。"
+    priceRule: "入金以次一交易日收盤價換算 0050 股數，並以 0.98 反映零股成交價差；若缺價則採最近可用市場報價或報告日現價。"
   };
+}
+
+
+function benchmarkPriceForCashFlow(portfolioId, securityId, tx, transactions = []) {
+  if (tx?.benchmarkSecurityId === securityId && toNumber(tx.benchmarkPrice) > 0) {
+    return {
+      price: toNumber(tx.benchmarkPrice),
+      source: tx.benchmarkPriceSource || "入金次一交易日收盤價",
+      sourceDate: tx.benchmarkPriceDate || tx.tradeDate
+    };
+  }
+  return benchmarkPriceForDate(portfolioId, securityId, tx?.tradeDate, transactions);
 }
 
 function benchmarkSecurity(portfolioId) {
@@ -6013,8 +6023,21 @@ function build0050BenchmarkSeries(portfolioId, transactions, benchmarkRows, repo
       if (tx.securityId === securityId && tx.transactionType === "BUY") shares += toNumber(tx.shares);
       if (tx.securityId === securityId && tx.transactionType === "SELL") shares -= toNumber(tx.shares);
     }
-    const equivalent = price ? shares + cash / price : shares;
-    return { date: date.slice(5), passive, equivalent, excess: equivalent - passive };
+    const cashEquivalentShares = price ? cash / price : 0;
+    const equivalent = shares + cashEquivalentShares;
+    const excess = equivalent - passive;
+    return {
+      date: date.slice(5),
+      fullDate: date,
+      price,
+      actualShares: shares,
+      cash,
+      cashEquivalentShares,
+      passive,
+      equivalent,
+      excess,
+      excessValue: excess * price
+    };
   });
 }
 function reportAssetSeries(portfolioId, transactions, brokerAccountId = "ALL") {
@@ -6463,6 +6486,7 @@ function borrowRebuyReportRows(portfolioId, accountId = "ALL") {
 function reportRows(type) {
   const portfolioId = selectedPortfolioId();
   const accountId = reportBrokerAccountId(portfolioId);
+  if (type === "performance0050") return benchmarkPerformanceReportRows(portfolioId, accountId);
   if (type === "borrowRebuy") return borrowRebuyReportRows(portfolioId, accountId);
   if (type === "transactions") {
     return {
@@ -6578,6 +6602,30 @@ function reportRows(type) {
       realized: fmtMoney(row.realized),
       rebuy: fmtNum(row.rebuy),
       issues: fmtNum(row.issues)
+    }))
+  };
+}
+
+function benchmarkPerformanceReportRows(portfolioId, brokerAccountId = "ALL") {
+  const transactions = scopedTransactions(portfolioId).filter((tx) => reportAccountMatches(tx, brokerAccountId)).slice().sort(sortByDateAsc);
+  const matches = state.sellMatches.filter((match) => match.portfolioId === portfolioId && reportAccountMatches(match, brokerAccountId));
+  const reportDate = latestReportDate(transactions, matches);
+  const inventoryLots = state.buyLots.filter((lot) => lot.portfolioId === portfolioId && reportAccountMatches(lot, brokerAccountId) && toNumber(lot.remainingShares) > 0);
+  const benchmark = build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inventoryLots, reportDate);
+  return {
+    columns: [
+      ["date", "日期"], ["price", "0050價"], ["actual", "剩餘0050"], ["cash", "現金"], ["cashShares", "現金等值股"], ["equivalent", "操作等值股"], ["passive", "不操作基準"], ["excess", "超額股數"], ["value", "超額等值"]
+    ],
+    rows: (benchmark.dailyRows || benchmark.series || []).map((row) => ({
+      date: escapeHtml(row.fullDate || row.date),
+      price: row.price ? fmtPrice(row.price) : "-",
+      actual: fmtNum(row.actualShares || 0, 2),
+      cash: fmtMoney(row.cash || 0),
+      cashShares: fmtNum(row.cashEquivalentShares || 0, 2),
+      equivalent: fmtNum(row.equivalent || 0, 2),
+      passive: fmtNum(row.passive || 0, 2),
+      excess: fmtNum(row.excess || 0, 2),
+      value: fmtMoney(row.excessValue || 0)
     }))
   };
 }
