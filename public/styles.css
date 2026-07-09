@@ -655,94 +655,8 @@ canvas {
   color: #475569;
 }
 
-
-.portfolio-snapshot {
-  border: 1px solid rgba(15, 118, 110, 0.18);
-  border-radius: 14px;
-  padding: 18px;
-  background:
-    linear-gradient(135deg, rgba(15, 118, 110, 0.12), rgba(37, 99, 235, 0.06)),
-    var(--glass-strong, #fff);
-  box-shadow: var(--glass-shadow, 0 18px 42px rgba(15, 23, 42, 0.10));
-}
-
-.snapshot-heading {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  align-items: flex-start;
-  margin-bottom: 16px;
-}
-
-.snapshot-heading .eyebrow {
-  display: inline-block;
-  color: var(--teal);
-  font-size: 12px;
-  font-weight: 900;
-  letter-spacing: .08em;
-}
-
-.snapshot-heading h2 {
-  margin: 4px 0;
-  font-size: clamp(24px, 3vw, 36px);
-}
-
-.snapshot-heading p {
-  margin: 0;
-  color: var(--muted);
-  font-weight: 700;
-}
-
-.snapshot-grid {
-  display: grid;
-  grid-template-columns: 1.35fr repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.snapshot-card {
-  min-width: 0;
-  border: 1px solid rgba(148, 163, 184, 0.30);
-  border-radius: 12px;
-  padding: 15px;
-  background: rgba(255, 255, 255, 0.78);
-  display: grid;
-  gap: 8px;
-}
-
-.snapshot-card span {
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 900;
-}
-
-.snapshot-card strong {
-  font-size: clamp(23px, 2.3vw, 34px);
-  line-height: 1.08;
-  overflow-wrap: anywhere;
-}
-
-.snapshot-card small {
-  color: var(--muted);
-  font-weight: 800;
-}
-
-.snapshot-card.highlight {
-  background: #10212f;
-  color: white;
-}
-
-.snapshot-card.highlight span,
-.snapshot-card.highlight small {
-  color: #c6d3df;
-}
-
-.secondary-metrics {
-  margin-top: -6px;
-}
-
 @media (max-width: 1180px) {
-  .metric-grid,
-  .snapshot-grid {
+  .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -865,14 +779,9 @@ canvas {
   }
 
   .metric-grid,
-  .snapshot-grid,
   .form-grid,
   .form-grid.compact {
     grid-template-columns: 1fr;
-  }
-
-  .snapshot-heading {
-    flex-direction: column;
   }
 
   .section-title,
@@ -4354,125 +4263,5 @@ td {
   100% {
     transform: scale(0.92);
     box-shadow: 0 0 0 0 rgba(245, 158, 11, 0);
-  }
-}
-@media (max-width: 860px) {
-  .portfolio-snapshot {
-    padding: 10px;
-    border-radius: 12px;
-  }
-
-  .snapshot-heading {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-
-  .snapshot-heading .eyebrow,
-  .snapshot-heading p,
-  .snapshot-card small {
-    display: none;
-  }
-
-  .snapshot-heading h2 {
-    margin: 0;
-    font-size: 15px;
-    line-height: 1.2;
-  }
-
-  .snapshot-heading .btn {
-    min-height: 30px;
-    padding: 5px 8px;
-    border-radius: 8px;
-    font-size: 12px;
-  }
-
-  .snapshot-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 7px;
-  }
-
-  .snapshot-card {
-    min-height: 0;
-    padding: 9px 10px;
-    border-radius: 10px;
-    gap: 3px;
-  }
-
-  .snapshot-card span {
-    font-size: 11px;
-    line-height: 1.1;
-  }
-
-  .snapshot-card strong {
-    font-size: clamp(17px, 4.8vw, 21px);
-    line-height: 1.05;
-  }
-}
-
-.snapshot-mobile-strip {
-  display: none;
-}
-
-@media (max-width: 860px) {
-  .snapshot-grid {
-    display: none;
-  }
-
-  .snapshot-mobile-strip {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 6px;
-  }
-
-  .mobile-snapshot-main,
-  .mobile-snapshot-chip {
-    min-width: 0;
-    border: 1px solid rgba(148, 163, 184, 0.28);
-    border-radius: 9px;
-    background: rgba(255, 255, 255, 0.78);
-    padding: 7px 8px;
-  }
-
-  .mobile-snapshot-main {
-    grid-column: 1 / -1;
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: 10px;
-    background: #10212f;
-    color: #fff;
-  }
-
-  .mobile-snapshot-main span,
-  .mobile-snapshot-chip span {
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 900;
-    white-space: nowrap;
-  }
-
-  .mobile-snapshot-main span {
-    color: #c6d3df;
-  }
-
-  .mobile-snapshot-main strong {
-    font-size: clamp(19px, 5.4vw, 24px);
-    line-height: 1;
-    overflow-wrap: anywhere;
-    text-align: right;
-  }
-
-  .mobile-snapshot-chip {
-    display: grid;
-    gap: 2px;
-  }
-
-  .mobile-snapshot-chip strong {
-    font-size: clamp(13px, 3.8vw, 16px);
-    line-height: 1.05;
-    overflow-wrap: anywhere;
   }
 }

@@ -1305,46 +1305,19 @@ function renderPortfolioSnapshot(portfolioId, brokerAccountId = "ALL", context =
   const quotes = inventoryQuoteMetrics(lots);
   const costBasis = sum(lots.map((lot) => ({ value: remainingCostBasis(lot) })), "value");
   const currentValue = quotes.hasQuotes ? metrics.cash + quotes.marketValue : metrics.cash + costBasis;
-  const unrealizedClass = quotes.unrealized >= 0 ? "positive" : "negative";
-  const quoteHint = quotes.hasQuotes ? "依最新現價估算" : "尚無現價，暫以庫存成本估算";
   const heldCount = heldSecuritiesForLots(lots).length;
+  const quoteHint = quotes.hasQuotes ? "依最新現價" : "無現價，暫以成本估算";
   return `
-    <section class="portfolio-snapshot ${escapeAttr(context)}">
-      <div class="snapshot-heading">
-        <div>
-          <span class="eyebrow">資產快照</span>
-          <h2>${accountScoped ? escapeHtml(accountName(brokerAccountId)) : "全部券商帳戶"}</h2>
-          <p>${escapeHtml(quoteHint)}，現值 = 現金餘額 + 庫存市值。</p>
-        </div>
+    <section class="section portfolio-summary ${escapeAttr(context)}">
+      <div class="section-title">
+        <div><h2>資產快照</h2><p>${accountScoped ? escapeHtml(accountName(brokerAccountId)) : "全部券商帳戶"} · 現值 = 現金餘額 + 庫存市值</p></div>
         <button class="btn compact-sync-btn" data-action="sync-yahoo-quotes">重抓現價</button>
       </div>
-      <div class="snapshot-mobile-strip" aria-label="資產快照精簡版">
-        <div class="mobile-snapshot-main"><span>現值</span><strong>${fmtMoney(currentValue)}</strong></div>
-        <div class="mobile-snapshot-chip"><span>餘額</span><strong>${fmtMoney(metrics.cash)}</strong></div>
-        <div class="mobile-snapshot-chip"><span>庫存</span><strong>${fmtNum(metrics.remainingShares)} 股</strong></div>
-        <div class="mobile-snapshot-chip"><span>市值</span><strong>${quotes.hasQuotes ? fmtMoney(quotes.marketValue) : "-"}</strong></div>
-      </div>
-      <div class="snapshot-grid">
-        <div class="snapshot-card highlight">
-          <span>目前現值</span>
-          <strong>${fmtMoney(currentValue)}</strong>
-          <small>${quoteHint}</small>
-        </div>
-        <div class="snapshot-card cash">
-          <span>現金餘額</span>
-          <strong>${fmtMoney(metrics.cash)}</strong>
-          <small>可用資金 / 入出金後餘額</small>
-        </div>
-        <div class="snapshot-card inventory">
-          <span>庫存</span>
-          <strong>${fmtNum(metrics.remainingShares)} 股</strong>
-          <small>${fmtNum(heldCount)} 檔股票，成本 ${fmtMoney(costBasis)}</small>
-        </div>
-        <div class="snapshot-card market">
-          <span>庫存市值</span>
-          <strong>${quotes.hasQuotes ? fmtMoney(quotes.marketValue) : "-"}</strong>
-          <small class="${unrealizedClass}">${quotes.hasQuotes ? `未實現 ${fmtMoney(quotes.unrealized)}` : "請同步現價"}</small>
-        </div>
+      <div class="filters">
+        <span class="pill">現值 ${fmtMoney(currentValue)}（${escapeHtml(quoteHint)}）</span>
+        <span class="pill">餘額 ${fmtMoney(metrics.cash)}</span>
+        <span class="pill">庫存 ${fmtNum(metrics.remainingShares)} 股 / ${fmtNum(heldCount)} 檔</span>
+        <span class="pill">市值 ${quotes.hasQuotes ? fmtMoney(quotes.marketValue) : "-"}</span>
       </div>
     </section>
   `;
