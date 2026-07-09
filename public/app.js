@@ -156,7 +156,7 @@ function initialState() {
     },
     ui: {
       currentPortfolioId: "",
-      report: "transactions",
+      report: "overview",
       reportBrokerAccountId: "ALL",
       transactionFilterSymbol: "ALL",
       transactionFilterAccount: "ALL",
@@ -2316,13 +2316,14 @@ function renderCashTransfers() {
     </section>
   `;
 }function renderReports() {
+  const currentReport = reportPresetKey();
   return `
     <section class="section">
       <div class="split-toolbar">
         <div class="section-title" style="margin-bottom:0">
           <div>
-            <h2>0050 操作績效追蹤</h2>
-            <p>以一個主要列表整理每日績效，移除重複的報表切換；入金以次一交易日收盤價 × 0.98 換算被動持有 0050 零股基準。</p>
+            <h2>專業投資報表</h2>
+            <p>從 0050 等效基準延伸到損益、庫存風險、現金流與交易品質，快速檢查策略是否真的改善資產效率。</p>
           </div>
         </div>
         <div class="filters">
@@ -2331,10 +2332,42 @@ function renderCashTransfers() {
           <button class="btn primary" data-action="export-xls">匯出 Excel</button>
         </div>
       </div>
+      <div class="report-period-tabs report-module-tabs" role="tablist" aria-label="報表類型">
+        ${reportPresets().map((item) => `<button type="button" class="${item.id === currentReport ? "active" : ""}" data-action="set-report-preset" data-report="${escapeAttr(item.id)}" role="tab" aria-selected="${item.id === currentReport ? "true" : "false"}">${escapeHtml(item.label)}</button>`).join("")}
+      </div>
     </section>
-    ${renderReportSummaryCards()}
-    ${render0050PerformanceReport()}
+    ${renderSelectedReportSection(currentReport)}
   `;
+}
+
+function reportPresets() {
+  return [
+    { id: "overview", label: "總覽" },
+    { id: "benchmark0050", label: "0050 基準" },
+    { id: "pnl", label: "損益" },
+    { id: "inventoryRisk", label: "庫存風險" },
+    { id: "cashflow", label: "現金流" },
+    { id: "tradeQuality", label: "交易品質" }
+  ];
+}
+
+function reportPresetKey() {
+  const selected = state.ui.report || "overview";
+  return reportPresets().some((item) => item.id === selected) ? selected : "overview";
+}
+
+function renderSelectedReportSection(reportType = reportPresetKey()) {
+  try {
+    if (reportType === "benchmark0050") return `${renderReportSummaryCards()}${render0050PerformanceReport()}`;
+    const model = buildPdfReportModel(selectedPortfolioId(), reportBrokerAccountId());
+    if (reportType === "pnl") return renderPnlReport(model);
+    if (reportType === "inventoryRisk") return renderInventoryRiskReport(model);
+    if (reportType === "cashflow") return renderCashflowReport(model);
+    if (reportType === "tradeQuality") return renderTradeQualityReport(model);
+    return renderReportOverview(model);
+  } catch (error) {
+    return `<section class="section"><div class="empty">目前沒有足夠資料產生專業報表：${escapeHtml(error.message || error)}</div></section>`;
+  }
 }
 
 function renderReportSummaryCards() {
@@ -2404,6 +2437,258 @@ function render0050PerformanceReport() {
     return `<section class="section"><div class="empty">目前沒有足夠資料產生 0050 績效追蹤：${escapeHtml(error.message || error)}</div></section>`;
   }
 }
+function renderReportOverview(model) {
+  const quality = buildReportQualityMetrics(model);
+  const inventory = buildInventoryRiskMetrics(model);
+  const cashflow = buildCashflowMetrics(model);
+  const insights = buildReportInsights(model, quality, inventory, cashflow);
+  return `
+    ${renderReportSummaryCards()}
+    <section class="metric-grid report-summary-grid">
+      ${metricCard("總資產估值", fmtMoney(cashflow.totalAssets), "teal")}
+      ${metricCard("本月已實現", fmtMoney(model.monthSummary.net), model.monthSummary.net >= 0 ? "teal" : "coral")}
+      ${metricCard("勝率", fmtPercentValue(quality.winRate), quality.winRate >= 0.5 ? "teal" : "amber")}
+      ${metricCard("現金閒置率", fmtPercentValue(cashflow.cashRatio), cashflow.cashRatio > 0.3 ? "amber" : "blue")}
+    </section>
+    ${renderReportInsights(insights)}
+    <section class="two-col report-chart-grid">
+      <div class="section">
+        <div class="section-title"><div><h2>資產曲線</h2><p>帳面資產 = 現金 + 庫存成本，用來觀察資金變化。</p></div></div>
+        ${pdfLineChart(model.assetSeries, [{ key: "assets", label: "帳面資產", color: "#0f766e" }, { key: "cash", label: "現金", color: "#2563eb" }], "TWD")}
+      </div>
+      <div class="section">
+        <div class="section-title"><div><h2>專業摘要</h2><p>把策略效率、風險與資金使用狀態放在同一張檢查表。</p></div></div>
+        <div class="summary-list">
+          <div class="summary-line"><span>今年已實現淨利</span><strong>${pdfSignedMoney(model.yearSummary.net)}</strong></div>
+          <div class="summary-line"><span>Profit Factor</span><strong>${quality.profitFactor ? fmtNum(quality.profitFactor, 2) : "-"}</strong></div>
+          <div class="summary-line"><span>最大持股集中度</span><strong>${fmtPercentValue(inventory.maxConcentration)}</strong></div>
+          <div class="summary-line"><span>費用侵蝕率</span><strong>${fmtPercentValue(quality.costDragRate)}</strong></div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderPnlReport(model) {
+  const inventoryRows = buildInventoryRiskMetrics(model).holdings.map((row) => ({
+    security: escapeHtml(row.security),
+    shares: fmtNum(row.shares),
+    cost: fmtMoney(row.cost),
+    marketValue: fmtMoney(row.marketValue),
+    unrealized: `<span class="${row.unrealized >= 0 ? "positive" : "negative"}">${fmtMoney(row.unrealized)}</span>`,
+    concentration: fmtPercentValue(row.concentration)
+  }));
+  return `
+    <section class="metric-grid report-summary-grid">
+      ${metricCard("當日淨利", fmtMoney(model.daySummary.net), model.daySummary.net >= 0 ? "teal" : "coral")}
+      ${metricCard("本月淨利", fmtMoney(model.monthSummary.net), model.monthSummary.net >= 0 ? "teal" : "coral")}
+      ${metricCard("今年淨利", fmtMoney(model.yearSummary.net), model.yearSummary.net >= 0 ? "teal" : "coral")}
+      ${metricCard("本年費稅", fmtMoney(model.yearSummary.costs), "amber")}
+    </section>
+    <section class="two-col report-chart-grid">
+      <div class="section"><div class="section-title"><div><h2>本月每日已實現損益</h2><p>依賣出配對日彙總毛利、費稅與淨利。</p></div></div><div class="bar-list">${model.monthDailyRows.length ? model.monthDailyRows.map((row) => pdfBarRow(row.period, row.net, Math.max(...model.monthDailyRows.map((item) => Math.abs(item.net)), 1))).join("") : `<div class="empty">本月尚無已實現損益</div>`}</div></div>
+      <div class="section"><div class="section-title"><div><h2>年度月別淨利</h2><p>檢查每個月份對年度損益的貢獻。</p></div></div><div class="bar-list">${model.yearMonthlyRows.length ? model.yearMonthlyRows.map((row) => pdfBarRow(row.period, row.net, Math.max(...model.yearMonthlyRows.map((item) => Math.abs(item.net)), 1))).join("") : `<div class="empty">本年尚無已實現損益</div>`}</div></div>
+    </section>
+    <section class="section"><div class="section-title"><div><h2>未實現庫存損益</h2><p>用目前報價或成本估值，檢查庫存尚未實現的盈虧。</p></div></div>${renderTable([["security", "股票"], ["shares", "股數"], ["cost", "剩餘成本"], ["marketValue", "估值"], ["unrealized", "未實現"], ["concentration", "佔比"]], inventoryRows, "目前沒有庫存")}</section>
+  `;
+}
+
+function renderInventoryRiskReport(model) {
+  const metrics = buildInventoryRiskMetrics(model);
+  return `
+    <section class="metric-grid report-summary-grid">
+      ${metricCard("最大持股集中度", fmtPercentValue(metrics.maxConcentration), metrics.maxConcentration > 0.5 ? "coral" : "teal")}
+      ${metricCard("庫存估值", fmtMoney(metrics.totalMarketValue), "blue")}
+      ${metricCard("90天以上成本", fmtMoney(metrics.agedCost), metrics.agedCost > 0 ? "amber" : "teal")}
+      ${metricCard("待回補股數", fmtNum(metrics.openRebuyShares), metrics.openRebuyShares > 0 ? "coral" : "teal")}
+    </section>
+    <section class="section"><div class="section-title"><div><h2>持股集中度</h2><p>依股票彙總估值與成本，找出是否過度集中。</p></div></div>${renderTable([["security", "股票"], ["marketValue", "估值"], ["concentration", "佔比"], ["shares", "股數"], ["cost", "剩餘成本"], ["oldestBuy", "最早買進"]], metrics.holdings.map((row) => ({ security: escapeHtml(row.security), marketValue: fmtMoney(row.marketValue), concentration: fmtPercentValue(row.concentration), shares: fmtNum(row.shares), cost: fmtMoney(row.cost), oldestBuy: escapeHtml(row.oldestBuy || "-") })), "目前沒有庫存")}</section>
+    <section class="section"><div class="section-title"><div><h2>庫存老化分布</h2><p>依買進日至報告日分桶，檢查資金卡住時間。</p></div></div>${renderTable([["bucket", "持有天數"], ["lots", "筆數"], ["shares", "股數"], ["cost", "成本"]], metrics.ageBuckets, "目前沒有庫存老化資料")}</section>
+  `;
+}
+
+function renderCashflowReport(model) {
+  const metrics = buildCashflowMetrics(model);
+  return `
+    <section class="metric-grid report-summary-grid">
+      ${metricCard("累計入金", fmtMoney(metrics.deposits), "blue")}
+      ${metricCard("累計出金", fmtMoney(metrics.withdraws), "amber")}
+      ${metricCard("淨投入", fmtMoney(metrics.netContribution), "teal")}
+      ${metricCard("資金週轉率", fmtPercentValue(metrics.turnoverRate), "blue")}
+    </section>
+    <section class="section"><div class="section-title"><div><h2>現金流明細</h2><p>逐筆追蹤入金、出金、買進與賣出的淨收付。</p></div></div>${renderTable([["date", "日期"], ["type", "類型"], ["security", "股票"], ["amount", "淨收付"], ["running", "累計現金"]], metrics.rows.map((row) => ({ date: escapeHtml(row.date), type: tradeTypeLabel(row.type), security: escapeHtml(row.security), amount: fmtMoney(row.amount), running: fmtMoney(row.running) })), "目前沒有現金流資料")}</section>
+  `;
+}
+
+function renderTradeQualityReport(model) {
+  const quality = buildReportQualityMetrics(model);
+  return `
+    <section class="metric-grid report-summary-grid">
+      ${metricCard("勝率", fmtPercentValue(quality.winRate), quality.winRate >= 0.5 ? "teal" : "amber")}
+      ${metricCard("賺賠比", quality.payoffRatio ? fmtNum(quality.payoffRatio, 2) : "-", quality.payoffRatio >= 1 ? "teal" : "coral")}
+      ${metricCard("Profit Factor", quality.profitFactor ? fmtNum(quality.profitFactor, 2) : "-", quality.profitFactor >= 1 ? "teal" : "coral")}
+      ${metricCard("平均持有天數", quality.avgHoldingDays ? `${fmtNum(quality.avgHoldingDays, 1)} 天` : "-", "blue")}
+    </section>
+    <section class="section"><div class="section-title"><div><h2>交易品質明細</h2><p>勝率之外，也看平均獲利、平均虧損與費稅侵蝕。</p></div></div><div class="summary-list">
+      <div class="summary-line"><span>平均獲利</span><strong>${fmtMoney(quality.avgWin)}</strong></div>
+      <div class="summary-line"><span>平均虧損</span><strong>${fmtMoney(quality.avgLoss)}</strong></div>
+      <div class="summary-line"><span>最大單筆獲利</span><strong>${fmtMoney(quality.bestTrade)}</strong></div>
+      <div class="summary-line"><span>最大單筆虧損</span><strong>${fmtMoney(quality.worstTrade)}</strong></div>
+      <div class="summary-line"><span>費用侵蝕率</span><strong>${fmtPercentValue(quality.costDragRate)}</strong></div>
+    </div></section>
+    <section class="section"><div class="section-title"><div><h2>已配對交易清單</h2><p>依每筆買賣配對列出淨利與持有天數。</p></div></div>${renderTable([["buyDate", "買進日"], ["sellDate", "賣出日"], ["shares", "股數"], ["prices", "買/賣價"], ["net", "淨利"], ["days", "持有天數"]], quality.rows, "目前沒有已配對交易")}</section>
+  `;
+}
+
+function buildReportQualityMetrics(model) {
+  const rows = model.matches.map((match) => {
+    const net = toNumber(match.netProfit);
+    const days = reportDaysBetween(match.buyDate, match.sellDate);
+    return {
+      buyDate: escapeHtml(match.buyDate || "-"),
+      sellDate: escapeHtml(match.sellDate || "-"),
+      shares: fmtNum(match.matchedShares),
+      prices: `${fmtPrice(match.buyPrice)} / ${fmtPrice(match.sellPrice)}`,
+      net: `<span class="${net >= 0 ? "positive" : "negative"}">${fmtMoney(net)}</span>`,
+      days: days === null ? "-" : `${fmtNum(days)} 天`,
+      _net: net,
+      _days: days
+    };
+  });
+  const wins = rows.filter((row) => row._net > 0);
+  const losses = rows.filter((row) => row._net < 0);
+  const totalWin = reportSum(wins, (row) => row._net);
+  const totalLoss = Math.abs(reportSum(losses, (row) => row._net));
+  const avgWin = wins.length ? totalWin / wins.length : 0;
+  const avgLoss = losses.length ? totalLoss / losses.length : 0;
+  const holdingDays = rows.map((row) => row._days).filter((days) => days !== null);
+  return {
+    rows,
+    winRate: rows.length ? wins.length / rows.length : 0,
+    avgWin,
+    avgLoss,
+    payoffRatio: avgLoss ? avgWin / avgLoss : 0,
+    profitFactor: totalLoss ? totalWin / totalLoss : (totalWin ? 99 : 0),
+    bestTrade: rows.length ? Math.max(...rows.map((row) => row._net)) : 0,
+    worstTrade: rows.length ? Math.min(...rows.map((row) => row._net)) : 0,
+    avgHoldingDays: holdingDays.length ? reportSum(holdingDays, (days) => days) / holdingDays.length : 0,
+    costDragRate: Math.abs(model.yearSummary.gross) ? model.yearSummary.costs / Math.abs(model.yearSummary.gross) : 0
+  };
+}
+
+function buildInventoryRiskMetrics(model) {
+  const totalMarketValue = reportSum(model.inventoryLots, (lot) => inventoryLotReportMarketValue(lot, model.benchmark.reportPrice));
+  const groups = new Map();
+  const ageBuckets = [
+    { bucket: "0-7 天", min: 0, max: 7, lots: 0, shares: 0, cost: 0 },
+    { bucket: "8-30 天", min: 8, max: 30, lots: 0, shares: 0, cost: 0 },
+    { bucket: "31-90 天", min: 31, max: 90, lots: 0, shares: 0, cost: 0 },
+    { bucket: "90 天以上", min: 91, max: Infinity, lots: 0, shares: 0, cost: 0 }
+  ];
+  for (const lot of model.inventoryLots) {
+    const key = lot.securityId || "UNKNOWN";
+    const marketValue = inventoryLotReportMarketValue(lot, model.benchmark.reportPrice);
+    const cost = lotRemainingCost(lot);
+    if (!groups.has(key)) groups.set(key, { security: securityLabel(key), shares: 0, cost: 0, marketValue: 0, oldestBuy: lot.buyDate || "" });
+    const row = groups.get(key);
+    row.shares += toNumber(lot.remainingShares);
+    row.cost += cost;
+    row.marketValue += marketValue;
+    if (lot.buyDate && (!row.oldestBuy || lot.buyDate < row.oldestBuy)) row.oldestBuy = lot.buyDate;
+    const days = reportDaysBetween(lot.buyDate, model.reportDate);
+    const bucket = ageBuckets.find((item) => days !== null && days >= item.min && days <= item.max);
+    if (bucket) {
+      bucket.lots += 1;
+      bucket.shares += toNumber(lot.remainingShares);
+      bucket.cost += cost;
+    }
+  }
+  const holdings = Array.from(groups.values())
+    .map((row) => ({ ...row, unrealized: row.marketValue - row.cost, concentration: totalMarketValue ? row.marketValue / totalMarketValue : 0 }))
+    .sort((a, b) => b.marketValue - a.marketValue);
+  const agedCost = ageBuckets.find((bucket) => bucket.bucket === "90 天以上")?.cost || 0;
+  const openRebuyShares = reportSum(model.borrowRebuyCycles.filter((cycle) => ["open", "partial"].includes(cycle.status)), (cycle) => cycle.remainingRebuyQty);
+  return {
+    totalMarketValue,
+    holdings,
+    maxConcentration: holdings.length ? holdings[0].concentration : 0,
+    agedCost,
+    openRebuyShares,
+    ageBuckets: ageBuckets.map((bucket) => ({ bucket: bucket.bucket, lots: fmtNum(bucket.lots), shares: fmtNum(bucket.shares), cost: fmtMoney(bucket.cost) }))
+  };
+}
+
+function buildCashflowMetrics(model) {
+  let running = 0;
+  const rows = model.transactions
+    .filter((tx) => ["DEPOSIT", "WITHDRAW", "BUY", "SELL"].includes(tx.transactionType))
+    .map((tx) => {
+      const amount = toNumber(effectiveTransactionAmounts(tx).netAmount);
+      running += amount;
+      return {
+        date: tx.tradeDate,
+        type: tx.transactionType,
+        security: securityLabel(tx.securityId),
+        amount,
+        running: roundMoney(running)
+      };
+    });
+  const deposits = reportSum(model.transactions.filter((tx) => tx.transactionType === "DEPOSIT"), (tx) => Math.abs(toNumber(effectiveTransactionAmounts(tx).netAmount)));
+  const withdraws = reportSum(model.transactions.filter((tx) => tx.transactionType === "WITHDRAW"), (tx) => Math.abs(toNumber(effectiveTransactionAmounts(tx).netAmount)));
+  const sellNet = reportSum(model.transactions.filter((tx) => tx.transactionType === "SELL"), (tx) => Math.max(0, toNumber(effectiveTransactionAmounts(tx).netAmount)));
+  const inventoryMarketValue = reportSum(model.inventoryLots, (lot) => inventoryLotReportMarketValue(lot, model.benchmark.reportPrice));
+  const totalAssets = model.metrics.cash + inventoryMarketValue;
+  return {
+    rows,
+    deposits,
+    withdraws,
+    netContribution: deposits - withdraws,
+    sellNet,
+    totalAssets,
+    cashRatio: totalAssets ? model.metrics.cash / totalAssets : 0,
+    turnoverRate: deposits ? sellNet / deposits : 0
+  };
+}
+
+function buildReportInsights(model, quality = buildReportQualityMetrics(model), inventory = buildInventoryRiskMetrics(model), cashflow = buildCashflowMetrics(model)) {
+  const insights = [];
+  if (model.benchmark?.reportPrice && model.benchmark.excessShares < 0) insights.push({ level: "danger", title: "策略目前落後 0050 基準", text: `等效少 ${fmtNum(Math.abs(model.benchmark.excessShares), 2)} 股，建議檢查交易成本與資金閒置。` });
+  if (cashflow.cashRatio > 0.3) insights.push({ level: "warning", title: "現金閒置率偏高", text: `目前現金佔總資產 ${fmtPercentValue(cashflow.cashRatio)}，可評估是否符合策略等待區間。` });
+  if (inventory.maxConcentration > 0.5) insights.push({ level: "warning", title: "單一持股集中度偏高", text: `最大持股佔庫存估值 ${fmtPercentValue(inventory.maxConcentration)}，需留意價格波動風險。` });
+  if (quality.costDragRate > 0.2) insights.push({ level: "warning", title: "費用侵蝕偏高", text: `今年費稅約佔毛利 ${fmtPercentValue(quality.costDragRate)}，可檢查零股頻率與手續費低消。` });
+  if (inventory.openRebuyShares > 0) insights.push({ level: "danger", title: "仍有待回補部位", text: `目前待回補 ${fmtNum(inventory.openRebuyShares)} 股，建議追蹤回補價格與期限。` });
+  if (!insights.length) insights.push({ level: "info", title: "目前沒有重大異常", text: "現金、集中度、費用與 0050 基準皆未觸發警示門檻。" });
+  return insights;
+}
+
+function renderReportInsights(insights) {
+  return `
+    <section class="section">
+      <div class="section-title"><div><h2>專業提醒</h2><p>自動檢查資金閒置、集中度、費用侵蝕與 0050 基準差距。</p></div></div>
+      <div class="report-insight-list">
+        ${insights.map((item) => `<div class="report-insight ${escapeAttr(item.level)}"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.text)}</span></div>`).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function reportDaysBetween(start, end) {
+  if (!start || !end) return null;
+  const startTime = Date.parse(`${start}T00:00:00`);
+  const endTime = Date.parse(`${end}T00:00:00`);
+  if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) return null;
+  return Math.max(0, Math.round((endTime - startTime) / 86400000));
+}
+
+function lotRemainingCost(lot) {
+  const ratio = toNumber(lot.originalShares) ? toNumber(lot.remainingShares) / Math.max(toNumber(lot.originalShares), 1) : 1;
+  return toNumber(lot.remainingShares) * toNumber(lot.buyPrice) + toNumber(lot.allocatedBuyFee) * ratio;
+}
+
+function fmtPercentValue(value) {
+  return `${fmtNum(toNumber(value) * 100, 1)}%`;
+}
+
 function handleSetReportPreset(reportType) {
   if (!reportType) return;
   state.ui.report = reportType;
