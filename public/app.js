@@ -148,6 +148,7 @@ function initialState() {
     positionTransfers: [],
     auditLogs: [],
     manualClosedRebuySellIds: [],
+    borrowRebuyCycles: [],
     settings: {
       user: { timezone: "Asia/Taipei", baseCurrency: "TWD", dateFormat: "YYYY-MM-DD" },
       portfolios: {},
@@ -485,6 +486,15 @@ function securityTaxRate(security, feeSetting) {
 }
 function inferSymbol(name) {
   const text = String(name || "").toUpperCase();
+  
+  const codeMatch = text.match(/\b\d{4,6}\b/) || text.match(/\d{4,6}/);
+  if (codeMatch) return codeMatch[0];
+  
+  if (typeof state !== "undefined" && state.securities) {
+    const found = state.securities.find((s) => s.name === name || name.includes(s.name) || s.name.includes(name));
+    if (found) return found.symbol;
+  }
+
   const known = [
     ["006208", "006208"],
     ["0056", "0056"],
@@ -671,6 +681,50 @@ function renderReportAccountSwitchSheet(accounts, selectedId, open) {
     </div>
   `;
 }
+
+function formatTimeOnly(isoText) {
+  if (!isoText) return "";
+  try {
+    const d = new Date(isoText);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${hh}:${mm}`;
+  } catch {
+    return String(isoText).slice(11, 16);
+  }
+}
+
+function renderTopbarSyncStatus() {
+  if (!canAutoSyncFirebase()) {
+    return `<button class="btn icon-btn sync-status local" type="button" data-action="firebase-push" title="僅本機儲存 (點擊嘗試同步)"><span class="dot"></span>Local</button>`;
+  }
+  const status = state.settings.firebase.status || "LOCAL_ONLY";
+  const lastSyncText = state.settings.firebase.lastSyncAt ? formatTimeOnly(state.settings.firebase.lastSyncAt) : "-";
+  
+  let label = "";
+  let className = "";
+  if (status === "SYNCED") {
+    label = `已同步 ${lastSyncText}`;
+    className = "synced";
+  } else if (status === "PENDING") {
+    label = "同步中...";
+    className = "pending";
+  } else if (status === "SYNC_FAILED") {
+    label = "同步失敗";
+    className = "failed";
+  } else {
+    label = "未同步";
+    className = "local";
+  }
+  
+  return `
+    <button class="btn icon-btn sync-status ${className}" type="button" data-action="firebase-push" title="最後同步: ${lastSyncText}，點擊強制同步">
+      <span class="dot"></span>
+      <span class="sync-label">${label}</span>
+    </button>
+  `;
+}
+
 function renderShell(path) {
   const user = currentUser();
   const portfolios = userPortfolios();
@@ -704,6 +758,7 @@ function renderShell(path) {
             <div class="topbar-sub">${escapeHtml(selectedPortfolio()?.name || "尚未建立 Portfolio")}</div>
           </div>
           <div class="topbar-right">
+            ${renderTopbarSyncStatus()}
             ${renderTopbarBrokerSwitch(path)}
             <div class="btn-row desktop-actions">
               <button class="btn primary" data-action="quick-buy" title="Alt+B">買進</button>
@@ -814,7 +869,29 @@ function renderQuickEntryModal() {
 
 function renderQuickTradeFields(type, entry, defaultSymbol, defaultName, accountId) {
   const linkedOptions = quickSellLotOptions(accountId, defaultSymbol);
+  const excludedSellId = entry.id || "";
+  const borrowSourceOptions = borrowSourceLotOptions(accountId, defaultSymbol, entry.sourceInventoryLotId || "", excludedSellId);
   const linkedValue = entry.linkedBuyTransactionId || "";
+  const borrowRebuyType = entry.borrowRebuyType || "";
+  
+  let sellFields = "";
+  if (type === "SELL") {
+    sellFields = `
+      <div class="field"><label>賣出類型</label><select name="borrowRebuyType">
+        <option value="" ${borrowRebuyType !== "BORROW_SELL" ? "selected" : ""}>一般賣出</option>
+        <option value="BORROW_SELL" ${borrowRebuyType === "BORROW_SELL" ? "selected" : ""}>自有庫存借券賣出</option>
+      </select></div>
+      <div class="field full" data-sell-normal-match-field ${borrowRebuyType === "BORROW_SELL" ? "hidden" : ""}>
+        <label>手動配對買進庫存 (一般賣出)</label>
+        ${renderMatchLotPicker(linkedOptions, linkedValue, `<input type="hidden" name="linkedBuyTransactionId" value="${escapeAttr(linkedValue)}" />`, "沒有可配對的買進庫存")}
+      </div>
+      <div class="field full" data-sell-borrow-match-field ${borrowRebuyType !== "BORROW_SELL" ? "hidden" : ""}>
+        <label>借券來源庫存 (可多選，先點先扣)</label>
+        ${renderMatchLotPicker(borrowSourceOptions, entry.sourceInventoryLotId || "", `<input type="hidden" name="sourceInventoryLotId" data-match-buy value="${escapeAttr(entry.sourceInventoryLotId || "")}" />`, "目前無可借出的持股庫存")}
+      </div>
+    `;
+  }
+
   return `
     <div class="field"><label>股票代號</label><input name="symbol" value="${escapeAttr(defaultSymbol)}" required /></div>
     <div class="field"><label>股票名稱</label><input name="securityName" value="${escapeAttr(defaultName)}" /></div>
@@ -822,32 +899,57 @@ function renderQuickTradeFields(type, entry, defaultSymbol, defaultName, account
     <div class="field"><label>股數</label><input type="number" inputmode="numeric" step="1" name="shares" value="${escapeAttr(entry.shares || 100)}" required /></div>
     <div class="field"><label>手續費</label><input type="number" inputmode="numeric" step="1" name="fee" value="${escapeAttr(entry.fee ?? "")}" placeholder="自動" /></div>
     <div class="field"><label>交易稅</label><input type="number" inputmode="numeric" step="1" name="tax" value="${escapeAttr(entry.tax ?? "")}" placeholder="自動" /></div>
-    ${type === "SELL" ? renderQuickSellMatchPicker(linkedOptions, linkedValue) : ""}
+    ${type === "SELL" ? sellFields : ""}
     ${type === "BUY" ? renderQuickBuyIntentFields(entry, defaultSymbol, accountId) : ""}
     <div class="field"><label>分類</label><select name="strategyCategory"><option ${entry.strategyCategory === "TRADING" ? "selected" : ""}>TRADING</option><option ${entry.strategyCategory === "LONG_TERM" ? "selected" : ""}>LONG_TERM</option><option ${entry.strategyCategory === "REBUY" ? "selected" : ""}>REBUY</option><option ${entry.strategyCategory === "CORE" ? "selected" : ""}>CORE</option></select></div>
     <div class="field full"><label>備註</label><input name="note" value="${escapeAttr(entry.note || `快捷${type === "BUY" ? "買進" : "賣出"}`)}" /></div>
   `;
 }
 
-function renderQuickSellMatchPicker(lots, selectedValue) {
-  return `
-    <div class="field full">
-      ${renderMatchLotPicker(lots, selectedValue, `<input type="hidden" name="linkedBuyTransactionId" value="${escapeAttr(selectedValue || "")}" />`, "沒有可配對的買進庫存")}
-    </div>
-  `;
-}
-
 function renderQuickBuyIntentFields(entry, symbol, accountId) {
-  const selectedValue = parseRebuySellIds(entry.rebuySellTransactionIds).join(",");
-  const intent = entry.buyIntent || (selectedValue ? "REBUY" : "NEW");
-  const normalizedIntent = String(intent || "NEW").toUpperCase() === "REBUY" ? "REBUY" : "NEW";
-  const options = activeRebuyTaskOptions(symbol, accountId);
+  const selectedRebuyValue = parseRebuySellIds(entry.rebuySellTransactionIds).join(",");
+  const selectedBorrowValue = entry.rebuyCycleId || "";
+  
+  let buyType = "NEW";
+  if (entry.borrowRebuyType === "REBUY_FILL") {
+    buyType = "BORROW_REBUY";
+  } else if (entry.buyIntent === "REBUY" || selectedRebuyValue) {
+    buyType = "REBUY";
+  }
+  
+  const normalRebuyOptions = activeRebuyTaskOptions(symbol, accountId);
+  const borrowCycleOptions = (state.borrowRebuyCycles || [])
+    .filter((cycle) => cycle.status !== "closed")
+    .filter((cycle) => cycle.symbol.toUpperCase() === symbol.toUpperCase())
+    .filter((cycle) => {
+      const sellTx = state.appTransactions.find(t => t.id === cycle.sellTradeId);
+      return !accountId || (sellTx && sellTx.brokerAccountId === accountId);
+    })
+    .map((cycle) => ({
+      value: cycle.id,
+      date: cycle.sellDate,
+      price: cycle.sellPrice,
+      shares: cycle.remainingRebuyQty,
+      security: symbol,
+      account: accountName(accountId),
+      category: "BORROW"
+    }));
+    
   return `
-    <div class="field"><label>買入用途</label><select name="buyIntent"><option value="NEW" ${normalizedIntent !== "REBUY" ? "selected" : ""}>新開/加碼</option><option value="REBUY" ${normalizedIntent === "REBUY" ? "selected" : ""}>回補</option></select></div>
-    <div class="field full rebuy-intent-field" data-rebuy-intent-field ${normalizedIntent === "REBUY" ? "" : "hidden"}>
-      <label>回補哪幾筆</label>
-      ${renderMatchLotPicker(options, selectedValue, `<input type="hidden" name="rebuySellTransactionIds" value="${escapeAttr(selectedValue)}" />`, "目前沒有待回補賣出單")}
-      <small class="field-hint">只有買入用途選「回補」時才會套用；新開/加碼不會被拿去回補。</small>
+    <div class="field"><label>買入用途</label><select name="buyType">
+      <option value="NEW" ${buyType === "NEW" ? "selected" : ""}>一般買進</option>
+      <option value="REBUY" ${buyType === "REBUY" ? "selected" : ""}>回補一般任務</option>
+      <option value="BORROW_REBUY" ${buyType === "BORROW_REBUY" ? "selected" : ""}>回補借券任務</option>
+    </select></div>
+    
+    <div class="field full rebuy-intent-field" data-rebuy-intent-field ${buyType === "REBUY" ? "" : "hidden"}>
+      <label>回補哪幾筆 (一般回補)</label>
+      ${renderMatchLotPicker(normalRebuyOptions, selectedRebuyValue, `<input type="hidden" name="rebuySellTransactionIds" value="${escapeAttr(selectedRebuyValue)}" />`, "目前沒有待回補賣出單")}
+    </div>
+    
+    <div class="field full borrow-rebuy-intent-field" data-borrow-rebuy-intent-field ${buyType === "BORROW_REBUY" ? "" : "hidden"}>
+      <label>回補哪一筆借券任務 (必選)</label>
+      ${renderMatchLotPicker(borrowCycleOptions, selectedBorrowValue, `<input type="hidden" name="rebuyCycleId" data-match-buy value="${escapeAttr(selectedBorrowValue)}" />`, "目前沒有待回補的借券賣出任務")}
     </div>
   `;
 }
@@ -927,6 +1029,100 @@ function parseRebuySellIds(value) {
   return [...new Set(ids)];
 }
 
+function normalizeSourceInventoryLotIds(value) {
+  return [...new Set(parseLinkedBuyIds(value))];
+}
+
+function lotPrimarySourceId(lot) {
+  return String(lot?.sourceTransactionId || lot?.buyTransactionId || "").trim();
+}
+
+function lotMatchesSourceId(lot, id) {
+  const cleanId = String(id || "").trim();
+  if (!cleanId || !lot) return false;
+  return [lot.sourceTransactionId, lot.buyTransactionId].map((value) => String(value || "").trim()).includes(cleanId);
+}
+
+function findBuyLotBySourceId(sourceId) {
+  return state.buyLots.find((lot) => lotMatchesSourceId(lot, sourceId)) || null;
+}
+
+function borrowRemainingForSell(sell) {
+  const cycle = (state.borrowRebuyCycles || []).find((item) => item.sellTradeId === sell.id);
+  if (cycle) return toNumber(cycle.remainingRebuyQty);
+  const filled = state.appTransactions
+    .filter((tx) => tx.transactionType === "BUY" && tx.borrowRebuyType === "REBUY_FILL" && tx.rebuyCycleId === sell.id)
+    .reduce((total, tx) => total + toNumber(tx.shares), 0);
+  return Math.max(0, toNumber(sell.shares) - filled);
+}
+
+function borrowSourceReservations(excludedSellId = "") {
+  const reserved = new Map();
+  const borrowSells = state.appTransactions
+    .filter((tx) => tx.transactionType === "SELL" && tx.borrowRebuyType === "BORROW_SELL" && tx.id !== excludedSellId)
+    .sort(sortByDateAsc);
+  for (const sell of borrowSells) {
+    let sharesToReserve = borrowRemainingForSell(sell);
+    if (sharesToReserve <= 0) continue;
+    for (const sourceId of normalizeSourceInventoryLotIds(sell.sourceInventoryLotId || sell.linkedBuyTransactionId)) {
+      const lot = findBuyLotBySourceId(sourceId);
+      if (!lot || sharesToReserve <= 0) continue;
+      const primaryId = lotPrimarySourceId(lot);
+      const available = Math.max(0, toNumber(lot.remainingShares) - toNumber(reserved.get(primaryId)));
+      const reservedShares = Math.min(sharesToReserve, available);
+      if (reservedShares <= 0) continue;
+      reserved.set(primaryId, toNumber(reserved.get(primaryId)) + reservedShares);
+      sharesToReserve -= reservedShares;
+    }
+  }
+  return reserved;
+}
+
+function borrowSourceLotOptions(accountId, symbol, selectedValue = "", excludedSellId = "") {
+  const selectedIds = normalizeSourceInventoryLotIds(selectedValue);
+  const reservations = borrowSourceReservations(excludedSellId);
+  return quickSellLotOptions(accountId, symbol)
+    .map((option) => {
+      const lot = findBuyLotBySourceId(option.value);
+      const reserved = lot ? toNumber(reservations.get(lotPrimarySourceId(lot))) : 0;
+      return { ...option, shares: Math.max(0, toNumber(option.shares) - reserved) };
+    })
+    .filter((option) => option.shares > 0 || selectedIds.some((id) => lotMatchesSourceId(findBuyLotBySourceId(option.value), id)));
+}
+
+function validateBorrowSellSourceLots(sourceValue, shares, account, securityId, portfolioId, excludedSellId = "") {
+  const selectedIds = normalizeSourceInventoryLotIds(sourceValue);
+  if (!selectedIds.length) throw new Error("請選擇借券來源庫存。");
+  const reservations = borrowSourceReservations(excludedSellId);
+  const lots = [];
+  const seen = new Set();
+  for (const sourceId of selectedIds) {
+    const lot = findBuyLotBySourceId(sourceId);
+    if (!lot) throw new Error("找不到選取的借券來源庫存。");
+    const primaryId = lotPrimarySourceId(lot);
+    if (seen.has(primaryId)) continue;
+    seen.add(primaryId);
+    if (lot.portfolioId !== portfolioId) throw new Error("選取的借券來源庫存不屬於目前帳本。");
+    if (lot.brokerAccountId !== account.id) throw new Error("選取的借券來源庫存屬於不同券商帳戶。");
+    if (lot.securityId !== securityId) throw new Error("選取的借券來源庫存和賣出股票不同。");
+    const available = Math.max(0, toNumber(lot.remainingShares) - toNumber(reservations.get(primaryId)));
+    lots.push({ lot, available });
+  }
+  const totalAvailable = lots.reduce((total, item) => total + item.available, 0);
+  if (toNumber(shares) > totalAvailable) {
+    const detail = lots.map((item) => fmtPrice(item.lot.buyPrice) + "元 " + fmtNum(item.available) + "股").join(" + ");
+    throw new Error("借出股數 (" + fmtNum(shares) + " 股) 不可超過已選來源庫存可借股數合計 (" + fmtNum(totalAvailable) + " 股" + (detail ? "：" + detail : "") + ")。");
+  }
+  return lots.map((item) => lotPrimarySourceId(item.lot)).join(",");
+}
+
+function borrowSourceCostLabel(sourceValue) {
+  const lots = normalizeSourceInventoryLotIds(sourceValue)
+    .map(findBuyLotBySourceId)
+    .filter(Boolean);
+  if (!lots.length) return "-";
+  return lots.map((lot) => fmtPrice(lot.buyPrice) + " / " + fmtNum(lot.originalShares) + "股").join(" + ");
+}
 function renderMatchLotPicker(lots, selectedValue, hiddenInputHtml, emptyText) {
   const selectedIds = parseLinkedBuyIds(selectedValue);
   const displayLots = orderedMatchLots(lots, selectedIds);
@@ -1214,8 +1410,8 @@ function renderImport() {
       <form class="form-grid" data-form="import-file">
         <div class="field"><label>來源</label><select name="sourceType"><option value="JSON_LEDGER">JSON 策略交易</option><option value="BROKER_CSV">券商 CSV</option></select></div>
         <div class="field"><label>券商帳戶</label><select name="brokerAccountId" required>${accounts.map((account) => `<option value="${account.id}" ${account.id === activeAccountId ? "selected" : ""}>${escapeHtml(accountName(account.id))}</option>`).join("")}</select></div>
-        <div class="field"><label>股票代號</label><input name="symbol" list="security-symbols" value="${escapeAttr(getPortfolioSettings().defaultSecurity)}" required /></div>
-        <div class="field"><label>股票名稱</label><input name="securityName" value="元大台灣50" /></div>
+        <div class="field"><label>股票代號</label><input name="symbol" list="security-symbols" value="${escapeAttr(getPortfolioSettings().defaultSecurity)}" required /><small class="field-hint">備用預設值：若 CSV 某列無股票代碼才套用</small></div>
+        <div class="field"><label>股票名稱</label><input name="securityName" value="元大台灣50" /><small class="field-hint">備用預設值</small></div>
         <div class="field full"><label>檔案</label><input type="file" name="importFile" accept=".json,.csv,text/csv,application/json" required /></div>
         <div class="field full">
           <div class="btn-row">
@@ -1418,6 +1614,24 @@ function transactionFilterSummary() {
   return parts.length ? parts.join(" · ") : "全部";
 }
 
+function getMatchesForSell(sell) {
+  if (sell.borrowRebuyType === "BORROW_SELL") {
+    const cycle = (state.borrowRebuyCycles || []).find((c) => c.sellTradeId === sell.id);
+    if (!cycle) return [];
+    return cycle.rebuyMatches.map((m) => ({
+      buyDate: m.rebuyDate,
+      buyPrice: m.rebuyPrice,
+      matchedShares: m.rebuyQty,
+      grossProfit: m.grossProfit,
+      netProfit: m.netProfit,
+      sellPrice: sell.price,
+      sellDate: sell.tradeDate,
+      isBorrowRebuy: true
+    }));
+  }
+  return state.sellMatches.filter((match) => match.sellTransactionId === sell.id);
+}
+
 function renderMatching() {
   const brokerAccountId = selectedBrokerAccountId();
   const sells = scopedTransactions().filter((tx) => tx.transactionType === "SELL" && (!brokerAccountId || tx.brokerAccountId === brokerAccountId)).sort(sortByDateDesc);
@@ -1427,7 +1641,7 @@ function renderMatching() {
       ${renderTable(
         [["sell", "賣出"], ["buy", "買入"], ["shares", "股數"], ["profit", "淨利"], ["detail", "詳細"]],
         sells.map((sell) => {
-          const matches = state.sellMatches.filter((match) => match.sellTransactionId === sell.id);
+          const matches = getMatchesForSell(sell);
           const matchedShares = sum(matches, "matchedShares");
           const netProfit = sum(matches, "netProfit");
           return {
@@ -1456,7 +1670,7 @@ function renderMatchSellSummary(sell) {
 }
 
 function renderMatchBuySummary(matches) {
-  if (!matches.length) return `<div class="match-summary-block empty"><span>買入</span><strong>未配對</strong><small>點詳細修改</small></div>`;
+  if (!matches.length) return `<div class="match-summary-block empty"><span>買入</span><strong>未配對</strong><small>點擊詳細修改</small></div>`;
   const ordered = [...matches].sort((a, b) => String(a.buyDate || "").localeCompare(String(b.buyDate || "")));
   const first = ordered[0];
   return `
@@ -1506,6 +1720,16 @@ function renderMatchingDetailContent(sell, matches) {
   const matchedShares = sum(matches, "matchedShares");
   const netProfit = sum(matches, "netProfit");
   const editing = state.ui.editingMatchSellId === sell.id;
+  
+  let actionsHtml = "";
+  if (sell.borrowRebuyType === "BORROW_SELL") {
+    actionsHtml = `<div class="match-detail-actions"><small class="field-hint">借券放空交易係由「回補買進單」自動配對，不可手動修改配對。</small></div>`;
+  } else if (editing) {
+    actionsHtml = renderMatchControl(sell);
+  } else {
+    actionsHtml = `<div class="match-detail-actions"><button class="btn primary" data-action="edit-match" data-sell-id="${escapeAttr(sell.id)}">修改配對</button></div>`;
+  }
+
   return `
     <div class="match-detail-grid">
       <div><span>股票</span><strong>${escapeHtml(securityLabel(sell.securityId))}</strong></div>
@@ -1519,11 +1743,7 @@ function renderMatchingDetailContent(sell, matches) {
       <div><span>淨利</span><strong class="${netProfit >= 0 ? "positive" : "negative"}">${fmtMoney(netProfit)}</strong></div>
     </div>
     ${renderMatchedBuyLots(matches)}
-    ${
-      editing
-        ? renderMatchControl(sell)
-        : `<div class="match-detail-actions"><button class="btn primary" data-action="edit-match" data-sell-id="${escapeAttr(sell.id)}">修改配對</button></div>`
-    }
+    ${actionsHtml}
   `;
 }
 
@@ -2068,6 +2288,7 @@ function renderCashTransfers() {
     ["yearlyProfit", "年獲利總結"],
     ["matches", "買賣配對"],
     ["rebuy", "待回補"],
+    ["borrowRebuy", "借券回補"],
     ["inventory", "庫存"],
     ["reconciliation", "券商對帳"],
     ["accounts", "券商績效"]
@@ -2462,6 +2683,35 @@ function handleSelectReportAccount(accountId) {
 }
 
 function onChange(event) {
+  if (event.target.name === "sourceType" && event.target.closest('form[data-form="import-file"]')) {
+    const form = event.target.closest('form[data-form="import-file"]');
+    const symbolFields = form.querySelectorAll('[name="symbol"], [name="securityName"]');
+    const isCsv = event.target.value === "BROKER_CSV";
+    for (const f of symbolFields) {
+      const fieldDiv = f.closest('.field');
+      if (fieldDiv) {
+        fieldDiv.hidden = isCsv;
+      }
+      f.required = !isCsv;
+    }
+    return;
+  }
+  if (event.target.name === "borrowRebuyType") {
+    const sheet = event.target.closest(".quick-entry-sheet");
+    const normalField = sheet?.querySelector("[data-sell-normal-match-field]");
+    const borrowField = sheet?.querySelector("[data-sell-borrow-match-field]");
+    if (normalField) normalField.hidden = event.target.value === "BORROW_SELL";
+    if (borrowField) borrowField.hidden = event.target.value !== "BORROW_SELL";
+    return;
+  }
+  if (event.target.name === "buyType") {
+    const sheet = event.target.closest(".quick-entry-sheet");
+    const rebuyField = sheet?.querySelector("[data-rebuy-intent-field]");
+    const borrowField = sheet?.querySelector("[data-borrow-rebuy-intent-field]");
+    if (rebuyField) rebuyField.hidden = event.target.value !== "REBUY";
+    if (borrowField) borrowField.hidden = event.target.value !== "BORROW_REBUY";
+    return;
+  }
   if (event.target.name === "buyIntent") {
     const sheet = event.target.closest(".quick-entry-sheet");
     const rebuyField = sheet?.querySelector("[data-rebuy-intent-field]");
@@ -2473,6 +2723,8 @@ function onChange(event) {
     const data = Object.fromEntries(new FormData(form).entries());
     data.linkedBuyTransactionId = "";
     data.rebuySellTransactionIds = "";
+    data.sourceInventoryLotId = "";
+    data.rebuyCycleId = "";
     state.ui.quickEntry = { ...state.ui.quickEntry, ...data, type: normalizeType(data.transactionType), brokerAccountId: data.brokerAccountId };
     persist();
     render();
@@ -2788,19 +3040,30 @@ function closeQuickEntry() {
 function handleMatchLotToggle(button) {
   const picker = button.closest(".match-picker");
   if (!picker) return;
-  const input = picker.querySelector('input[name="linkedBuyTransactionId"], input[name="rebuySellTransactionIds"], input[data-match-buy]');
+  const input = picker.querySelector('input[name="linkedBuyTransactionId"], input[name="rebuySellTransactionIds"], input[name="sourceInventoryLotId"], input[name="rebuyCycleId"], input[data-match-buy]');
   if (!input) return;
   const matchIds = parseLinkedBuyIds(button.dataset.matchIds || button.dataset.matchId);
-  const ids = parseLinkedBuyIds(input.value);
-  const hasAll = matchIds.every((id) => ids.includes(id));
-  if (hasAll) {
-    for (const matchId of matchIds) {
-      const existingIndex = ids.indexOf(matchId);
-      if (existingIndex >= 0) ids.splice(existingIndex, 1);
+  let ids = parseLinkedBuyIds(input.value);
+  const isSingleSelect = ["rebuyCycleId"].includes(input.name);
+  
+  if (isSingleSelect) {
+    const hasAll = matchIds.every((id) => ids.includes(id));
+    if (hasAll) {
+      ids = [];
+    } else {
+      ids = [matchIds[0]];
     }
   } else {
-    for (const matchId of matchIds) {
-      if (!ids.includes(matchId)) ids.push(matchId);
+    const hasAll = matchIds.every((id) => ids.includes(id));
+    if (hasAll) {
+      for (const matchId of matchIds) {
+        const existingIndex = ids.indexOf(matchId);
+        if (existingIndex >= 0) ids.splice(existingIndex, 1);
+      }
+    } else {
+      for (const matchId of matchIds) {
+        if (!ids.includes(matchId)) ids.push(matchId);
+      }
     }
   }
   refreshMatchPicker(picker, ids);
@@ -2812,7 +3075,7 @@ function handleClearMatchPicker(button) {
 }
 
 function refreshMatchPicker(picker, ids) {
-  const input = picker.querySelector('input[name="linkedBuyTransactionId"], input[name="rebuySellTransactionIds"], input[data-match-buy]');
+  const input = picker.querySelector('input[name="linkedBuyTransactionId"], input[name="rebuySellTransactionIds"], input[name="sourceInventoryLotId"], input[name="rebuyCycleId"], input[data-match-buy]');
   if (input) input.value = ids.join(",");
   picker.querySelectorAll(".match-lot-card").forEach((card) => {
     const cardIds = parseLinkedBuyIds(card.dataset.matchIds || card.dataset.matchId);
@@ -2898,25 +3161,55 @@ async function handleQuickEntrySubmit(data) {
       tx.linkedBuyTransactionId = "";
       tx.rebuySellTransactionIds = "";
       tx.buyIntent = "";
+      tx.borrowRebuyType = "";
+      tx.sourceInventoryLotId = "";
+      tx.rebuyCycleId = "";
     } else {
       const securityForCosts = ensureSecurity(data.symbol, data.securityName);
       const autoCosts = estimateTradeCosts(type, data.price, data.shares, account.brokerId, securityForCosts);
       const fee = String(data.fee ?? "").trim() === "" ? autoCosts.fee : toNumber(data.fee);
       const tax = String(data.tax ?? "").trim() === "" ? autoCosts.tax : toNumber(data.tax);
-      const rebuySellIds = type === "BUY" ? parseRebuySellIds(data.rebuySellTransactionIds) : [];
-      const buyIntent = type === "BUY" ? (rebuySellIds.length ? "REBUY" : String(data.buyIntent || "NEW").toUpperCase()) : "";
+      
+      let borrowRebuyType = "";
+      let sourceInventoryLotId = "";
+      let rebuyCycleId = "";
+      let buyIntent = "";
+      let rebuySellIds = [];
 
-      if (type === "BUY" && buyIntent === "REBUY") {
-        if (!rebuySellIds.length) throw new Error("請選擇要回補哪幾筆賣出；如果不是回補，請選新開/加碼。");
-        const tasksBySellId = new Map(state.rebuyTasks.map((task) => [task.sellTransactionId, task]));
-        for (const sellId of rebuySellIds) {
-          const task = tasksBySellId.get(sellId);
-          // For editing, allow selecting the same task even if closed, as long as it's the one we're currently linked to
-          const currentLinked = String(oldTx.rebuySellTransactionIds || "").split(/[,\s]+/).includes(sellId);
-          if (!currentLinked && (!task || rebuyTaskIsArchived(task))) throw new Error("選到的回補任務不存在或已完成，請重新選擇。");
-          if (task.portfolioId !== portfolioId) throw new Error("選到的回補任務不屬於目前帳本，請重新選擇。");
-          if (task.securityId !== securityForCosts.id) throw new Error("選到的回補任務和買入股票不同，請重新選擇。");
-          if (task.brokerAccountId !== account.id) throw new Error("選到的回補任務屬於不同券商帳戶，請切換帳戶或改選。");
+      if (type === "SELL") {
+        borrowRebuyType = String(data.borrowRebuyType || "").trim();
+        if (borrowRebuyType === "BORROW_SELL") {
+          sourceInventoryLotId = validateBorrowSellSourceLots(data.sourceInventoryLotId, data.shares, account, securityForCosts.id, portfolioId, data.id);
+        }
+      } else if (type === "BUY") {
+        const buyType = String(data.buyType || "").trim();
+        if (buyType === "BORROW_REBUY") {
+          borrowRebuyType = "REBUY_FILL";
+          rebuyCycleId = String(data.rebuyCycleId || "").trim();
+          if (!rebuyCycleId) throw new Error("請選擇回補借券任務。");
+          
+          const cycle = state.borrowRebuyCycles.find((c) => c.id === rebuyCycleId);
+          if (!cycle) throw new Error("找不到對應的借券任務。");
+          const shares = toNumber(data.shares);
+          const currentSharesInCycle = isEdit ? oldTx.shares : 0;
+          if (shares > (cycle.remainingRebuyQty + currentSharesInCycle)) {
+            throw new Error(`回補股數 (${shares} 股) 不可超過待回補股數 (${cycle.remainingRebuyQty + currentSharesInCycle} 股)。`);
+          }
+        } else if (buyType === "REBUY") {
+          buyIntent = "REBUY";
+          rebuySellIds = parseRebuySellIds(data.rebuySellTransactionIds);
+          if (!rebuySellIds.length) throw new Error("請選擇要回補哪幾筆賣出；如果不是回補，請選一般買進。");
+          const tasksBySellId = new Map(state.rebuyTasks.map((task) => [task.sellTransactionId, task]));
+          for (const sellId of rebuySellIds) {
+            const task = tasksBySellId.get(sellId);
+            const currentLinked = String(oldTx.rebuySellTransactionIds || "").split(/[,\s]+/).includes(sellId);
+            if (!currentLinked && (!task || rebuyTaskIsArchived(task))) throw new Error("選到的回補任務不存在或已完成，請重新選擇。");
+            if (task.portfolioId !== portfolioId) throw new Error("選到的回補任務不屬於目前帳本，請重新選擇。");
+            if (task.securityId !== securityForCosts.id) throw new Error("選到的回補任務和買入股票不同，請重新選擇。");
+            if (task.brokerAccountId !== account.id) throw new Error("選到的回補任務屬於不同券商帳戶，請切換帳戶或改選。");
+          }
+        } else {
+          buyIntent = "NEW";
         }
       }
 
@@ -2929,9 +3222,12 @@ async function handleQuickEntrySubmit(data) {
       tx.fee = fee;
       tx.tax = tax;
       tx.strategyCategory = buyIntent === "REBUY" ? "REBUY" : data.strategyCategory || (type === "BUY" ? "TRADING" : "LONG_TERM");
-      tx.linkedBuyTransactionId = data.linkedBuyTransactionId || "";
+      tx.linkedBuyTransactionId = borrowRebuyType === "BORROW_SELL" ? "" : (data.linkedBuyTransactionId || "");
       tx.rebuySellTransactionIds = buyIntent === "REBUY" ? rebuySellIds.join(",") : "";
       tx.buyIntent = type === "BUY" ? buyIntent : "";
+      tx.borrowRebuyType = borrowRebuyType;
+      tx.sourceInventoryLotId = sourceInventoryLotId;
+      tx.rebuyCycleId = rebuyCycleId;
     }
 
     tx.note = String(data.note || "").trim();
@@ -2969,19 +3265,48 @@ async function handleQuickEntrySubmit(data) {
   const autoCosts = estimateTradeCosts(type, data.price, data.shares, account.brokerId, securityForCosts);
   const fee = String(data.fee ?? "").trim() === "" ? autoCosts.fee : toNumber(data.fee);
   const tax = String(data.tax ?? "").trim() === "" ? autoCosts.tax : toNumber(data.tax);
-  const rebuySellIds = type === "BUY" ? parseRebuySellIds(data.rebuySellTransactionIds) : [];
-  const buyIntent = type === "BUY" ? (rebuySellIds.length ? "REBUY" : String(data.buyIntent || "NEW").toUpperCase()) : "";
-  if (type === "BUY" && buyIntent === "REBUY") {
-    if (!rebuySellIds.length) throw new Error("請選擇要回補哪幾筆賣出；如果不是回補，請選新開/加碼。");
-    const tasksBySellId = new Map(state.rebuyTasks.map((task) => [task.sellTransactionId, task]));
-    for (const sellId of rebuySellIds) {
-      const task = tasksBySellId.get(sellId);
-      if (!task || rebuyTaskIsArchived(task)) throw new Error("選到的回補任務不存在或已完成，請重新選擇。");
-      if (task.portfolioId !== portfolioId) throw new Error("選到的回補任務不屬於目前帳本，請重新選擇。");
-      if (task.securityId !== securityForCosts.id) throw new Error("選到的回補任務和買入股票不同，請重新選擇。");
-      if (task.brokerAccountId !== account.id) throw new Error("選到的回補任務屬於不同券商帳戶，請切換帳戶或改選。");
+  
+  let borrowRebuyType = "";
+  let sourceInventoryLotId = "";
+  let rebuyCycleId = "";
+  let buyIntent = "";
+  let rebuySellIds = [];
+
+  if (type === "SELL") {
+    borrowRebuyType = String(data.borrowRebuyType || "").trim();
+    if (borrowRebuyType === "BORROW_SELL") {
+      sourceInventoryLotId = validateBorrowSellSourceLots(data.sourceInventoryLotId, data.shares, account, securityForCosts.id, portfolioId);
+    }
+  } else if (type === "BUY") {
+    const buyType = String(data.buyType || "").trim();
+    if (buyType === "BORROW_REBUY") {
+      borrowRebuyType = "REBUY_FILL";
+      rebuyCycleId = String(data.rebuyCycleId || "").trim();
+      if (!rebuyCycleId) throw new Error("請選擇回補借券任務。");
+      
+      const cycle = state.borrowRebuyCycles.find((c) => c.id === rebuyCycleId);
+      if (!cycle) throw new Error("找不到對應的借券任務。");
+      const shares = toNumber(data.shares);
+      if (shares > cycle.remainingRebuyQty) {
+        throw new Error(`回補股數 (${shares} 股) 不可超過待回補股數 (${cycle.remainingRebuyQty} 股)。`);
+      }
+    } else if (buyType === "REBUY") {
+      buyIntent = "REBUY";
+      rebuySellIds = parseRebuySellIds(data.rebuySellTransactionIds);
+      if (!rebuySellIds.length) throw new Error("請選擇要回補哪幾筆賣出；如果不是回補，請選一般買進。");
+      const tasksBySellId = new Map(state.rebuyTasks.map((task) => [task.sellTransactionId, task]));
+      for (const sellId of rebuySellIds) {
+        const task = tasksBySellId.get(sellId);
+        if (!task || rebuyTaskIsArchived(task)) throw new Error("選到的回補任務不存在或已完成，請重新選擇。");
+        if (task.portfolioId !== portfolioId) throw new Error("選到的回補任務不屬於目前帳本，請重新選擇。");
+        if (task.securityId !== securityForCosts.id) throw new Error("選到的回補任務和買入股票不同，請重新選擇。");
+        if (task.brokerAccountId !== account.id) throw new Error("選到的回補任務屬於不同券商帳戶，請切換帳戶或改選。");
+      }
+    } else {
+      buyIntent = "NEW";
     }
   }
+
   await handleManualTransaction({
     tradeDate: data.tradeDate,
     brokerAccountId: account.id,
@@ -2993,9 +3318,12 @@ async function handleQuickEntrySubmit(data) {
     fee,
     tax,
     strategyCategory: buyIntent === "REBUY" ? "REBUY" : data.strategyCategory || (type === "BUY" ? "TRADING" : "LONG_TERM"),
-    linkedBuyTransactionId: data.linkedBuyTransactionId || "",
+    linkedBuyTransactionId: borrowRebuyType === "BORROW_SELL" ? "" : (data.linkedBuyTransactionId || ""),
     rebuySellTransactionIds: buyIntent === "REBUY" ? rebuySellIds.join(",") : "",
     buyIntent: type === "BUY" ? buyIntent : "",
+    borrowRebuyType,
+    sourceInventoryLotId,
+    rebuyCycleId,
     note: data.note
   });
   showToast(`${type === "BUY" ? "買進" : "賣出"}已記錄；請記得上傳同日券商交易紀錄對帳。`);
@@ -3023,6 +3351,9 @@ function handleEditTransaction(id) {
     linkedBuyTransactionId: tx.linkedBuyTransactionId,
     rebuySellTransactionIds: tx.rebuySellTransactionIds,
     buyIntent: tx.buyIntent,
+    borrowRebuyType: tx.borrowRebuyType,
+    sourceInventoryLotId: tx.sourceInventoryLotId,
+    rebuyCycleId: tx.rebuyCycleId,
     note: tx.note
   });
 }
@@ -3495,6 +3826,9 @@ async function handleManualTransaction(data) {
     linkedBuyTransactionId: String(data.linkedBuyTransactionId || "").trim(),
     rebuySellTransactionIds: parseRebuySellIds(data.rebuySellTransactionIds).join(","),
     buyIntent: String(data.buyIntent || "").trim(),
+    borrowRebuyType: String(data.borrowRebuyType || "").trim(),
+    sourceInventoryLotId: String(data.sourceInventoryLotId || "").trim(),
+    rebuyCycleId: String(data.rebuyCycleId || "").trim(),
     note: String(data.note || "").trim(),
     isConfirmed: true,
     ...(await benchmarkFieldsForTransaction(portfolioId, account.id, data.transactionType, parseDate(data.tradeDate))),
@@ -4094,7 +4428,11 @@ function defaultImportContext(filename) {
 function importContext(data, filename) {
   const account = state.brokerAccounts.find((item) => item.id === data.brokerAccountId);
   if (!account) throw new Error("找不到券商帳戶");
-  const security = ensureSecurity(data.symbol, data.securityName);
+  
+  const symbol = String(data.symbol || "").trim() || "UNKNOWN";
+  const name = String(data.securityName || "").trim() || symbol;
+  
+  const security = ensureSecurity(symbol, name);
   return {
     userId: currentUser().id,
     portfolioId: account.portfolioId,
@@ -4329,9 +4667,24 @@ function parseCsv(text) {
   });
 }
 
+function findSymbolInRow(row) {
+  const keys = Object.keys(row);
+  const symbolKey = keys.find((k) => ["股號", "股票代號", "股票代碼", "商品代號", "代號", "symbol", "code", "stockNo"].includes(String(k).trim()));
+  if (symbolKey) return String(row[symbolKey] || "").trim();
+  return null;
+}
+
 function mapBrokerRow(row, context) {
   const securityName = String(row["股名"] || "").trim();
-  const security = ensureSecurity(securityById(context.securityId)?.symbol || inferSymbol(securityName), securityName);
+  
+  let symbol = findSymbolInRow(row);
+  if (!symbol) symbol = inferSymbol(securityName);
+  
+  if (!symbol || symbol === "UNKNOWN") {
+    symbol = securityById(context.securityId)?.symbol || "UNKNOWN";
+  }
+  
+  const security = ensureSecurity(symbol, securityName);
   const sideRaw = String(row["買賣別"] || "").trim();
   return {
     securityId: security.id,
@@ -4359,6 +4712,9 @@ function normalizeTransaction(input) {
   tx.linkedBuyTransactionId = String(tx.linkedBuyTransactionId || "").trim();
   tx.rebuySellTransactionIds = tx.transactionType === "BUY" ? parseRebuySellIds(tx.rebuySellTransactionIds).join(",") : "";
   tx.buyIntent = tx.transactionType === "BUY" ? (tx.rebuySellTransactionIds ? "REBUY" : String(tx.buyIntent || "NEW").toUpperCase()) : "";
+  tx.borrowRebuyType = String(tx.borrowRebuyType || "").trim();
+  tx.sourceInventoryLotId = String(tx.sourceInventoryLotId || "").trim();
+  tx.rebuyCycleId = String(tx.rebuyCycleId || "").trim();
   tx.grossAmount = ["DEPOSIT", "WITHDRAW", "INTEREST", "DIVIDEND"].includes(tx.transactionType) ? tx.price : tx.price * tx.shares;
   if (tx.transactionType === "BUY") tx.netAmount = -(tx.grossAmount + tx.fee + tx.tax);
   else if (tx.transactionType === "SELL") tx.netAmount = tx.grossAmount - tx.fee - tx.tax;
@@ -4372,6 +4728,7 @@ function recomputeAll() {
   state.appTransactions = state.appTransactions.map(normalizeTransaction);
   runReconciliation();
   recomputeLotsMatchesAndRebuy();
+  recomputeBorrowRebuyCycles();
   recomputeCashLedger();
 }
 
@@ -4379,7 +4736,7 @@ function recomputeLotsMatchesAndRebuy() {
   const lots = [];
   const lotBySource = new Map();
   const buyTransactions = state.appTransactions
-    .filter((tx) => tx.transactionType === "BUY")
+    .filter((tx) => tx.transactionType === "BUY" && tx.borrowRebuyType !== "REBUY_FILL")
     .sort(sortByDateAsc);
   for (const buy of buyTransactions) {
     const buyAmounts = effectiveTransactionAmounts(buy);
@@ -4411,7 +4768,7 @@ function recomputeLotsMatchesAndRebuy() {
 
   const matches = [];
   const sellTransactions = state.appTransactions
-    .filter((tx) => tx.transactionType === "SELL")
+    .filter((tx) => tx.transactionType === "SELL" && tx.borrowRebuyType !== "BORROW_SELL")
     .sort(sortByDateAsc);
 
   const sellRemainingSharesMap = new Map();
@@ -4563,6 +4920,100 @@ function recomputeLotsMatchesAndRebuy() {
   state.rebuyTasks = tasks;
   state.rebuyFills = fills;
 }
+
+function recomputeBorrowRebuyCycles() {
+  const cycles = [];
+  
+  const borrowSells = state.appTransactions
+    .filter((tx) => tx.transactionType === "SELL" && tx.borrowRebuyType === "BORROW_SELL")
+    .sort(sortByDateAsc);
+    
+  const rebuyFills = state.appTransactions
+    .filter((tx) => tx.transactionType === "BUY" && tx.borrowRebuyType === "REBUY_FILL")
+    .sort(sortByDateAsc);
+    
+  const fillByCycleId = new Map();
+  for (const fill of rebuyFills) {
+    if (!fill.rebuyCycleId) continue;
+    if (!fillByCycleId.has(fill.rebuyCycleId)) {
+      fillByCycleId.set(fill.rebuyCycleId, []);
+    }
+    fillByCycleId.get(fill.rebuyCycleId).push(fill);
+  }
+  
+  for (const sell of borrowSells) {
+    const cycleId = sell.id;
+    const security = securityById(sell.securityId);
+    const symbol = security?.symbol || "";
+    
+    const cycleFills = fillByCycleId.get(cycleId) || [];
+    let totalRebuyQty = 0;
+    let totalRebuyCost = 0;
+    let totalBuyFee = 0;
+    let totalBuyTax = 0;
+    const rebuyMatches = [];
+    
+    for (const fill of cycleFills) {
+      const rebuyQty = fill.shares;
+      const grossProfit = roundMoney((sell.price - fill.price) * rebuyQty);
+      
+      const allocatedSellFee = roundMoney(sell.fee * (rebuyQty / Math.max(sell.shares, 1)));
+      const allocatedSellTax = roundMoney(sell.tax * (rebuyQty / Math.max(sell.shares, 1)));
+      const allocatedBuyFee = fill.fee;
+      const allocatedBuyTax = fill.tax;
+      const netProfit = roundMoney(grossProfit - allocatedSellFee - allocatedSellTax - allocatedBuyFee - allocatedBuyTax);
+      
+      totalRebuyQty += rebuyQty;
+      totalRebuyCost += fill.price * rebuyQty;
+      totalBuyFee += allocatedBuyFee;
+      totalBuyTax += allocatedBuyTax;
+      
+      rebuyMatches.push({
+        rebuyTradeId: fill.id,
+        rebuyDate: fill.tradeDate,
+        rebuyPrice: fill.price,
+        rebuyQty: rebuyQty,
+        grossProfit: grossProfit,
+        netProfit: netProfit
+      });
+    }
+    
+    const remainingRebuyQty = Math.max(0, sell.shares - totalRebuyQty);
+    const avgRebuyPrice = totalRebuyQty > 0 ? roundMoney(totalRebuyCost / totalRebuyQty) : 0;
+    const grossProfit = roundMoney((sell.price * totalRebuyQty) - totalRebuyCost);
+    
+    const totalSellFeeAllocated = roundMoney(sell.fee * (totalRebuyQty / Math.max(sell.shares, 1)));
+    const totalSellTaxAllocated = roundMoney(sell.tax * (totalRebuyQty / Math.max(sell.shares, 1)));
+    const netProfit = roundMoney(grossProfit - totalSellFeeAllocated - totalSellTaxAllocated - totalBuyFee - totalBuyTax);
+    
+    let status = "open";
+    if (totalRebuyQty >= sell.shares) {
+      status = "closed";
+    } else if (totalRebuyQty > 0) {
+      status = "partial";
+    }
+    
+    cycles.push({
+      id: cycleId,
+      symbol: symbol,
+      sourceInventoryLotId: normalizeSourceInventoryLotIds(sell.sourceInventoryLotId || sell.linkedBuyTransactionId).join(","),
+      sellTradeId: sell.id,
+      sellDate: sell.tradeDate,
+      sellPrice: sell.price,
+      sellQty: sell.shares,
+      rebuyMatches: rebuyMatches,
+      totalRebuyQty: totalRebuyQty,
+      remainingRebuyQty: remainingRebuyQty,
+      avgRebuyPrice: avgRebuyPrice,
+      grossProfit: grossProfit,
+      netProfit: netProfit,
+      status: status
+    });
+  }
+  
+  state.borrowRebuyCycles = cycles;
+}
+
 
 function recomputeCashLedger() {
   const ledger = [];
@@ -5240,6 +5691,7 @@ async function exportExcel() {
       ${reportHtmlTable("年獲利總結", reportRows("yearlyProfit"))}
       ${reportHtmlTable("買賣配對", reportRows("matches"))}
       ${reportHtmlTable("待回補", reportRows("rebuy"))}
+      ${reportHtmlTable("借券回補", reportRows("borrowRebuy"))}
       ${reportHtmlTable("庫存", reportRows("inventory"))}
       ${reportHtmlTable("券商對帳", reportRows("reconciliation"))}
       ${reportHtmlTable("券商績效", reportRows("accounts"))}
@@ -5355,6 +5807,14 @@ function buildPdfReportModel(portfolioId, brokerAccountId = reportBrokerAccountI
     dayBuySpend: Math.abs(reportSum(dayTransactions.filter((tx) => tx.transactionType === "BUY"), (tx) => effectiveTransactionAmounts(tx).netAmount)),
     daySellNet: reportSum(dayTransactions.filter((tx) => tx.transactionType === "SELL"), (tx) => effectiveTransactionAmounts(tx).netAmount),
     depositsToDate: reportSum(transactions.filter((tx) => tx.transactionType === "DEPOSIT" && tx.tradeDate <= reportDate), (tx) => effectiveTransactionAmounts(tx).netAmount),
+    borrowRebuyCycles: (state.borrowRebuyCycles || [])
+      .filter((cycle) => {
+        const sellTx = state.appTransactions.find((tx) => tx.id === cycle.sellTradeId);
+        if (!sellTx) return false;
+        if (sellTx.portfolioId !== portfolioId) return false;
+        if (brokerAccountId !== "ALL" && sellTx.brokerAccountId !== brokerAccountId) return false;
+        return true;
+      }),
     benchmark: build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inventoryLots, reportDate)
   };
 }
@@ -5673,6 +6133,45 @@ function buildPrettyPdfReportHtml(model) {
     ${pdfReportTable(["買進日", "股票", "成本價", "剩餘股數", "剩餘成本", "券商帳戶"], model.inventoryLots.map((lot) => [lot.buyDate, securityLabel(lot.securityId), fmtPrice(lot.buyPrice), fmtNum(lot.remainingShares), fmtMoney(lot.remainingShares * lot.buyPrice), accountName(lot.brokerAccountId)]), [2,3,4], "目前沒有庫存")}
   </section>
 
+  ${(() => {
+    if (!model.borrowRebuyCycles || !model.borrowRebuyCycles.length) return "";
+    const rows = model.borrowRebuyCycles.map((cycle) => {
+      const sourceCostText = borrowSourceCostLabel(cycle.sourceInventoryLotId);
+      const statusLabel = {
+        open: "未回補",
+        partial: "部分回補",
+        closed: "已完成"
+      }[cycle.status] || cycle.status;
+      
+      return [
+        securityLabel(state.appTransactions.find(t => t.id === cycle.sellTradeId)?.securityId),
+        sourceCostText,
+        fmtPrice(cycle.sellPrice),
+        fmtNum(cycle.sellQty),
+        fmtNum(cycle.totalRebuyQty),
+        fmtNum(cycle.remainingRebuyQty),
+        cycle.totalRebuyQty > 0 ? fmtPrice(cycle.avgRebuyPrice) : "-",
+        fmtMoney(cycle.grossProfit),
+        fmtMoney(cycle.netProfit),
+        statusLabel
+      ];
+    });
+    return `
+      <section>
+        <div class="section-title">
+          <div><h2>借券回補操作</h2><div class="hint">自有庫存借券高賣低補之策略績效（已分攤手續費與稅金）。</div></div>
+          <span class="pill">策略</span>
+        </div>
+        ${pdfReportTable(
+          ["股票", "來源庫存成本", "借券賣出價", "賣出股數", "已回補股數", "待回補股數", "平均回補價", "策略毛利", "策略淨利", "狀態"],
+          rows,
+          [1, 2, 3, 4, 5, 6, 7, 8],
+          "無借券回補紀錄"
+        )}
+      </section>
+    `;
+  })()}
+
   <section>
     <div class="section-title"><div><h2>資料與備註</h2><div class="hint">正式匯出會帶入目前 APP 內已採用的券商對帳數字。</div></div></div>
     <div class="summary-list">
@@ -5845,9 +6344,64 @@ function reportHtmlTable(title, rows) {
   `;
 }
 
+function borrowRebuyReportRows(portfolioId, accountId = "ALL") {
+  const cycles = (state.borrowRebuyCycles || [])
+    .filter((cycle) => {
+      const sellTx = state.appTransactions.find((tx) => tx.id === cycle.sellTradeId);
+      if (!sellTx) return false;
+      if (sellTx.portfolioId !== portfolioId) return false;
+      if (accountId !== "ALL" && sellTx.brokerAccountId !== accountId) return false;
+      return true;
+    });
+
+  return {
+    columns: [
+      ["security", "股票"],
+      ["sourceCost", "來源庫存成本"],
+      ["sellPrice", "借券賣出價"],
+      ["sellQty", "賣出股數"],
+      ["rebuyQty", "已回補股數"],
+      ["remainingQty", "待回補股數"],
+      ["avgRebuyPrice", "平均回補價"],
+      ["grossProfit", "借券操作毛利"],
+      ["netProfit", "借券操作淨利"],
+      ["status", "狀態"]
+    ],
+    rows: cycles.map((cycle) => {
+      const sourceCostText = borrowSourceCostLabel(cycle.sourceInventoryLotId);
+      
+      const statusLabel = {
+        open: "未回補",
+        partial: "部分回補",
+        closed: "已完成"
+      }[cycle.status] || cycle.status;
+      
+      const statusClass = {
+        open: "status-danger",
+        partial: "status-warning",
+        closed: "status-success"
+      }[cycle.status] || "";
+
+      return {
+        security: escapeHtml(securityLabel(state.appTransactions.find(t => t.id === cycle.sellTradeId)?.securityId)),
+        sourceCost: sourceCostText,
+        sellPrice: fmtPrice(cycle.sellPrice),
+        sellQty: fmtNum(cycle.sellQty),
+        rebuyQty: fmtNum(cycle.totalRebuyQty),
+        remainingQty: fmtNum(cycle.remainingRebuyQty),
+        avgRebuyPrice: cycle.totalRebuyQty > 0 ? fmtPrice(cycle.avgRebuyPrice) : "-",
+        grossProfit: fmtMoney(cycle.grossProfit),
+        netProfit: fmtMoney(cycle.netProfit),
+        status: `<span class="status-pill ${statusClass}">${statusLabel}</span>`
+      };
+    })
+  };
+}
+
 function reportRows(type) {
   const portfolioId = selectedPortfolioId();
   const accountId = reportBrokerAccountId(portfolioId);
+  if (type === "borrowRebuy") return borrowRebuyReportRows(portfolioId, accountId);
   if (type === "transactions") {
     return {
       columns: [
@@ -6163,7 +6717,7 @@ function renderTransactionsTable(rows) {
         date: tx.tradeDate,
         account: escapeHtml(accountName(tx.brokerAccountId)),
         security: escapeHtml(securityLabel(tx.securityId)),
-        type: statusPill(tx.transactionType),
+        type: statusPill(tradeTypeLabel(tx.transactionType, tx.borrowRebuyType)),
         price: fmtPrice(tx.price),
         shares: fmtNum(tx.shares),
         gross: fmtMoney(amounts.grossAmount),
@@ -6281,7 +6835,7 @@ function renderTransactionMobileRow(tx, amounts) {
     <details class="mobile-transaction-row">
       <summary>
         <span class="mt-date"><strong>${escapeHtml(compactDate(tx.tradeDate))}</strong><small>${escapeHtml(securityLabel(tx.securityId).split(" ")[0] || "-")}</small></span>
-        <span class="mt-side ${escapeAttr(tx.transactionType.toLowerCase())}">${escapeHtml(tradeTypeLabel(tx.transactionType))}</span>
+        <span class="mt-side ${escapeAttr(tx.transactionType.toLowerCase())}">${escapeHtml(tradeTypeLabel(tx.transactionType, tx.borrowRebuyType))}</span>
         <span class="mt-num"><small>股數</small><strong>${fmtNum(tx.shares)}</strong></span>
         <span class="mt-num"><small>成交價</small><strong>${fmtPrice(tx.price)}</strong></span>
       </summary>
@@ -6299,7 +6853,9 @@ function renderTransactionMobileRow(tx, amounts) {
   `;
 }
 
-function tradeTypeLabel(type) {
+function tradeTypeLabel(type, borrowRebuyType = "") {
+  if (type === "SELL" && borrowRebuyType === "BORROW_SELL") return "借券賣出";
+  if (type === "BUY" && borrowRebuyType === "REBUY_FILL") return "借券回補";
   const labels = { BUY: "買進", SELL: "賣出", DEPOSIT: "入金", INTEREST: "存款利息", DIVIDEND: "股息", WITHDRAW: "出金" };
   return labels[type] || type || "-";
 }

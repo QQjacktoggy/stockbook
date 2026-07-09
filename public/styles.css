@@ -4185,3 +4185,83 @@ td {
     max-height: calc(100dvh - 340px);
   }
 }
+
+/* Firebase Topbar Auto Sync Indicator Styles */
+.sync-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e293b;
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.03);
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  height: 38px;
+}
+.sync-status:hover {
+  background: rgba(255, 255, 255, 0.65);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(0,0,0,0.06);
+}
+.sync-status .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.sync-status.synced {
+  color: #065f46;
+  background: rgba(209, 250, 229, 0.6);
+  border-color: rgba(16, 185, 129, 0.3);
+}
+.sync-status.synced .dot {
+  background: #10b981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+}
+.sync-status.pending {
+  color: #92400e;
+  background: rgba(254, 243, 199, 0.6);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+.sync-status.pending .dot {
+  background: #f59e0b;
+  animation: pulse-orange 1.2s infinite;
+}
+.sync-status.failed {
+  color: #991b1b;
+  background: rgba(254, 226, 226, 0.6);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+.sync-status.failed .dot {
+  background: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.6);
+}
+.sync-status.local {
+  color: #475569;
+  background: rgba(241, 245, 249, 0.6);
+  border-color: rgba(148, 163, 184, 0.3);
+}
+.sync-status.local .dot {
+  background: #94a3b8;
+}
+
+@keyframes pulse-orange {
+  0% {
+    transform: scale(0.92);
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.8);
+  }
+  70% {
+    transform: scale(1.08);
+    box-shadow: 0 0 0 6px rgba(245, 158, 11, 0);
+  }
+  100% {
+    transform: scale(0.92);
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0);
+  }
+}
