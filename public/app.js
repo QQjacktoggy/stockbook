@@ -152,7 +152,8 @@ function initialState() {
     settings: {
       user: { timezone: "Asia/Taipei", baseCurrency: "TWD", dateFormat: "YYYY-MM-DD" },
       portfolios: {},
-      firebase: { configText: "", namespace: "", lastSyncAt: "", status: "LOCAL_ONLY" }
+      firebase: { configText: "", namespace: "", lastSyncAt: "", status: "LOCAL_ONLY" },
+      backup: { provider: "GOOGLE_DRIVE", enabled: false, scheduleTime: "03:00", retentionDays: 90, monthlyRetention: 12 }
     },
     ui: {
       currentPortfolioId: "",
@@ -175,6 +176,7 @@ function initialState() {
       editingMatchSellId: "",
       quickActionSheetOpen: false,
       accountSheetOpen: false,
+      settingsTab: "general",
       quickEntry: null
     }
   };
@@ -202,7 +204,8 @@ function normalizeState(input) {
     ...(input.settings || {}),
     user: { ...base.settings.user, ...((input.settings || {}).user || {}) },
     portfolios: { ...base.settings.portfolios, ...((input.settings || {}).portfolios || {}) },
-    firebase: { ...base.settings.firebase, ...((input.settings || {}).firebase || {}) }
+    firebase: { ...base.settings.firebase, ...((input.settings || {}).firebase || {}) },
+    backup: { ...base.settings.backup, ...((input.settings || {}).backup || {}) }
   };
   merged.ui = { ...base.ui, ...(input.ui || {}) };
   merged.securities = (merged.securities || []).map((security) => ({
@@ -2726,10 +2729,27 @@ function renderReportChartPreview() {
 }
 function renderSettings() {
   const settings = getPortfolioSettings();
+  const settingsTab = state.ui.settingsTab || "general";
   return `
+
+    <section class="settings-hub">
+      <div class="section-title"><div><h2>設定中心</h2><p>帳戶、策略、同步與備份集中管理。</p></div></div>
+      <div class="settings-tabs" role="tablist" aria-label="設定分類">
+        <button type="button" class="settings-tab ${settingsTab === "general" ? "active" : ""}" data-action="set-settings-tab" data-settings-tab="general" role="tab">一般</button>
+        <button type="button" class="settings-tab ${settingsTab === "strategy" ? "active" : ""}" data-action="set-settings-tab" data-settings-tab="strategy" role="tab">策略與回補</button>
+        <button type="button" class="settings-tab ${settingsTab === "brokers" ? "active" : ""}" data-action="set-settings-tab" data-settings-tab="brokers" role="tab">券商與費稅</button>
+        <button type="button" class="settings-tab ${settingsTab === "data" ? "active" : ""}" data-action="set-settings-tab" data-settings-tab="data" role="tab">同步與備份</button>
+        <button type="button" class="settings-tab ${settingsTab === "audit" ? "active" : ""}" data-action="set-settings-tab" data-settings-tab="audit" role="tab">稽核紀錄</button>
+      </div>
+    </section>
+    <div class="settings-panel" ${settingsTab !== "general" ? "hidden" : ""}>
     ${renderAccountSettingsSection()}
     ${renderSecuritySettingsSection()}
+    </div>
+    <div class="settings-panel" ${settingsTab !== "brokers" ? "hidden" : ""}>
     ${renderBrokerFeeSettingsSection()}
+    </div>
+    <div class="settings-panel" ${settingsTab !== "strategy" ? "hidden" : ""}>
     <section class="section">
       <div class="section-title"><div><h2>Portfolio Settings</h2><p>回補規則、容忍差異與分攤方法</p></div></div>
       <form class="form-grid" data-form="settings-save">
@@ -2744,6 +2764,8 @@ function renderSettings() {
         <div class="field full"><div class="btn-row"><button class="btn primary" type="submit">儲存設定</button><button class="btn danger" type="button" data-action="reset-portfolio-settings">重置設定</button></div></div>
       </form>
     </section>
+    </div>
+    <div class="settings-panel" ${settingsTab !== "data" ? "hidden" : ""}>
     <section class="section">
       <div class="section-title"><div><h2>Firebase Sync</h2><p>貼上 Web config 後可同步目前使用者帳本</p></div></div>
       <form class="form-grid" data-form="firebase-save">
@@ -2770,11 +2792,39 @@ function renderSettings() {
         </div>
       </form>
     </section>
+    ${renderDriveBackupSettings()}
+
+    </div>
+    <div class="settings-panel" ${settingsTab !== "audit" ? "hidden" : ""}>
     <section class="section">
       <div class="section-title"><div><h2>Audit Logs</h2><p>人工修改 before / after 留痕</p></div></div>
       ${renderAuditLogs()}
     </section>
+    </div>
   `;
+}
+
+
+function renderDriveBackupSettings() {
+  const backup = state.settings.backup || {};
+  const status = backup.enabled ? "已啟用每日備份" : "尚未連結 Google Drive";
+  const lastBackup = backup.lastBackupAt ? formatDateTime(backup.lastBackupAt) : "尚未備份";
+  return [
+    "<section class=\"section backup-settings-section\">",
+    "<div class=\"section-title\"><div><h2>Google Drive 每日備份</h2><p>每天 03:00 備份已同步帳本，保留 90 天每日檔與 12 個月底檔。</p></div><span class=\"pill\">" + escapeHtml(status) + "</span></div>",
+    "<div class=\"backup-status-grid\">",
+    "<div><span>最後備份</span><strong>" + escapeHtml(lastBackup) + "</strong></div>",
+    "<div><span>保留政策</span><strong>" + escapeHtml(String(backup.retentionDays || 90)) + " 日 / " + escapeHtml(String(backup.monthlyRetention || 12)) + " 月</strong></div>",
+    "<div><span>排程</span><strong>每日 " + escapeHtml(backup.scheduleTime || "03:00") + " 台北時間</strong></div>",
+    "</div>",
+    "<div class=\"btn-row\">",
+    "<button class=\"btn primary\" type=\"button\" data-action=\"backup-connect-drive\">連結 Google Drive</button>",
+    "<button class=\"btn blue\" type=\"button\" data-action=\"backup-run-now\">立即備份</button><button class=\"btn\" type=\"button\" data-action=\"backup-open-folder\">開啟備份資料夾</button>",
+    "<button class=\"btn\" type=\"button\" data-action=\"backup-refresh-status\">重新整理狀態</button>",
+    "<button class=\"btn danger\" type=\"button\" data-action=\"backup-disconnect-drive\">解除連結</button>",
+    "</div>",
+    "</section>"
+  ].join("");
 }
 
 function renderAccountSettingsSection() {
@@ -2935,7 +2985,18 @@ async function onClick(event) {
     if (action === "edit-position-transfer") return handleEditPositionTransfer(actionButton.dataset.id);
     if (action === "delete-position-transfer") return handleDeletePositionTransfer(actionButton.dataset.id);
     if (action === "reset-portfolio-settings") return handleResetPortfolioSettings();
+    if (action === "set-settings-tab") {
+      state.ui.settingsTab = actionButton.dataset.settingsTab || "general";
+      persist();
+      render();
+      return;
+    }
     if (action === "clear-firebase-settings") return handleClearFirebaseSettings();
+    if (action === "backup-connect-drive") return await connectGoogleDriveBackup();
+    if (action === "backup-run-now") return await runGoogleDriveBackupNow();
+    if (action === "backup-refresh-status") return await refreshDriveBackupStatus();
+    if (action === "backup-open-folder") return openGoogleDriveBackupFolder();
+    if (action === "backup-disconnect-drive") return await disconnectGoogleDriveBackup();
     if (action === "quick-rebuy-task") return handleRebuyTaskBuy(actionButton.dataset.sellIds);
     if (action === "manual-close-rebuy-group") return handleManualCloseRebuyGroup(actionButton.dataset.sellIds);
     if (action === "manual-close-rebuy") return handleManualCloseRebuy(actionButton.dataset.sellId);
@@ -2945,42 +3006,33 @@ async function onClick(event) {
     if (action === "firebase-push") return await syncToFirebase();
     if (action === "firebase-pull") return await loadFromFirebase();
     if (action === "download-backup-file") {
-      const rawData = localStorage.getItem(STORAGE_KEY);
-      if (!rawData) {
-        showToast("本機沒有找到任何資料暫存！");
-        return;
-      }
-      const blob = new Blob([rawData], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `stockbook_backup_${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      showToast("備份檔案已成功下載！");
+      await downloadBackupEnvelope("LOCAL_EXPORT");
+      showToast("已下載可驗證的 JSON 備份檔。");
       return;
     }
     if (action === "trigger-import-file") {
       const fileInput = document.getElementById("backup-file-import-input");
       if (!fileInput) return;
-      fileInput.onchange = (e) => {
-        const file = e.target.files[0];
+      fileInput.onchange = (event) => {
+        const file = event.target.files[0];
         if (!file) return;
         const reader = new FileReader();
-        reader.onload = (event) => {
+        reader.onload = async (loadEvent) => {
           try {
-            const parsed = JSON.parse(event.target.result);
-            const normalized = normalizeState(parsed);
-            state = normalized;
-            persist();
+            const importedState = await parseBackupDocument(JSON.parse(loadEvent.target.result));
+            const currentScore = ledgerContentScore(exportCurrentUserState());
+            const incomingScore = ledgerContentScore(importedState);
+            const confirmed = window.confirm("即將匯入備份資料。現有資料會先下載安全備份。\n目前資料項目：" + currentScore + "\n匯入資料項目：" + incomingScore);
+            if (!confirmed) return;
+            await downloadBackupEnvelope("PRE_RESTORE");
+            mergeCurrentUserState(importedState);
             recomputeAll();
+            persist();
             render();
-            showToast("成功匯入 JSON 備份檔案！");
-          } catch (err) {
-            console.error(err);
-            showToast("匯入失敗，請確認檔案格式是否正確。");
+            showToast("已完成備份驗證、建立安全備份並匯入資料。");
+          } catch (error) {
+            console.error(error);
+            showToast("匯入失敗：" + (error.message || "請確認檔案格式"));
           }
         };
         reader.readAsText(file);
@@ -5747,10 +5799,12 @@ async function getFirebaseRuntime() {
   const appModule = await import("https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js");
   const firestoreModule = await import("https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js");
   const authModule = await import("https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js");
+  const functionsModule = await import("https://www.gstatic.com/firebasejs/10.12.5/firebase-functions.js");
   const firebaseApp = appModule.initializeApp(config);
   const db = firestoreModule.getFirestore(firebaseApp);
   const auth = authModule.getAuth(firebaseApp);
-  firebaseRuntime = { db, auth, authModule, ...firestoreModule };
+  const functions = functionsModule.getFunctions(firebaseApp, "asia-east1");
+  firebaseRuntime = { db, auth, authModule, functions, functionsModule, ...firestoreModule };
   return firebaseRuntime;
 }
 
@@ -5946,6 +6000,103 @@ function firebaseNamespace() {
     .trim()
     .replace(/[^a-zA-Z0-9._-]/g, "_");
 }
+
+
+const BACKUP_FORMAT = "stockbook-backup-v2";
+
+async function backupSha256(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function createBackupEnvelope(source = "LOCAL_EXPORT") {
+  const backupState = exportCurrentUserState();
+  const stateJson = JSON.stringify(backupState);
+  return {
+    format: BACKUP_FORMAT,
+    schemaVersion: 2,
+    createdAt: nowIso(),
+    source,
+    checksum: { algorithm: "SHA-256", value: await backupSha256(stateJson) },
+    state: backupState
+  };
+}
+
+async function parseBackupDocument(parsed) {
+  if (!parsed || typeof parsed !== "object") throw new Error("備份檔格式無效");
+  if (parsed.format !== BACKUP_FORMAT) return parsed;
+  if (!parsed.state || parsed.schemaVersion !== 2) throw new Error("不支援的備份版本");
+  if (!parsed.checksum || parsed.checksum.algorithm !== "SHA-256") throw new Error("備份檔缺少驗證碼");
+  const actualChecksum = await backupSha256(JSON.stringify(parsed.state));
+  if (actualChecksum !== parsed.checksum.value) throw new Error("備份檔驗證失敗，檔案可能已損壞");
+  return parsed.state;
+}
+
+async function downloadBackupEnvelope(source = "LOCAL_EXPORT") {
+  const envelope = await createBackupEnvelope(source);
+  const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = "stockbook_backup_" + new Date().toISOString().slice(0, 10) + ".json";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+
+async function callBackupFunction(name, data = {}) {
+  const runtime = await getFirebaseRuntime();
+  requireFirebaseUser(runtime);
+  const callable = runtime.functionsModule.httpsCallable(runtime.functions, name);
+  return (await callable(data)).data;
+}
+
+async function refreshDriveBackupStatus() {
+  const remote = await callBackupFunction("getBackupStatus");
+  state.settings.backup = {
+    ...state.settings.backup,
+    enabled: Boolean(remote.enabled),
+    connected: Boolean(remote.connected),
+    connectedEmail: remote.connectedEmail || "",
+    folderId: remote.folderId || "",
+    lastBackupAt: remote.lastBackupAt || "",
+    lastStatus: remote.lastStatus || "IDLE",
+    recentRuns: remote.runs || []
+  };
+  persist();
+  render();
+  return remote;
+}
+
+async function connectGoogleDriveBackup() {
+  const result = await callBackupFunction("startDriveAuthorization", { namespace: firebaseNamespace() });
+  if (!result.url) throw new Error("無法建立 Google Drive 授權連結。");
+  window.location.assign(result.url);
+}
+
+async function runGoogleDriveBackupNow() {
+  const result = await callBackupFunction("runBackupNow");
+  await refreshDriveBackupStatus();
+  showToast("Google Drive 備份完成：" + result.fileName);
+}
+
+function openGoogleDriveBackupFolder() {
+  const folderId = state.settings.backup && state.settings.backup.folderId;
+  if (!folderId) throw new Error("尚未建立 Google Drive 備份資料夾。");
+  window.open("https://drive.google.com/drive/folders/" + encodeURIComponent(folderId), "_blank", "noopener");
+}
+
+async function disconnectGoogleDriveBackup() {
+  if (!window.confirm("確定解除 Google Drive 連結？每日備份會停止。")) return;
+  await callBackupFunction("disconnectDrive");
+  state.settings.backup = { ...state.settings.backup, enabled: false, connected: false, connectedEmail: "", lastStatus: "DISCONNECTED" };
+  persist();
+  render();
+  showToast("已解除 Google Drive 連結。");
+}
+
 
 function exportCurrentUserState() {
   const user = currentUser();
