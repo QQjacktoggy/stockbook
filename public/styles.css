@@ -4504,3 +4504,69 @@ td {
     border-radius: 22px;
   }
 }
+
+
+.settings-hub {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(255, 255, 255, 0.72);
+  border-radius: 8px;
+}
+
+.settings-tab {
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.settings-tab.active {
+  background: #0f766e;
+  color: #fff;
+}
+
+.settings-panel[hidden] {
+  display: none;
+}
+
+.backup-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.backup-status-grid > div {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.backup-status-grid span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .backup-status-grid {
+    grid-template-columns: 1fr;
+  }
+}

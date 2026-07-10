@@ -7,6 +7,12 @@
       "**/node_modules/**"
     ]
   },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "backup"
+    }
+  ],
   "firestore": {
     "rules": "firestore.rules"
   }
