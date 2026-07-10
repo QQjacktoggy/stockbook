@@ -73,6 +73,9 @@ const NAV_ITEMS = [
   ["/app/settings", "設定"]
 ];
 
+const SELL_TYPE_REGULAR = "REGULAR_SELL";
+const SELL_TYPE_BORROW = "BORROW_SELL";
+
 const DEFAULT_TEMPLATE = {
   id: "tpl-cathay-default",
   brokerId: "broker-cathay",
@@ -769,11 +772,6 @@ function renderShell(path) {
               <button class="btn blue" data-action="quick-deposit" title="Alt+D">入金</button>
               <button class="btn" data-action="quick-income" title="Alt+I">收益</button>
               <button class="btn" data-action="quick-withdraw" title="Alt+W">出金</button>
-              <button class="btn" data-action="load-sample-json">載入範例 JSON</button>
-              <button class="btn" data-action="load-sample-csv">載入範例 CSV</button>
-              <button class="btn blue" data-action="export-pdf-report">匯出 PDF</button>
-              <button class="btn" data-action="email-report-summary">Email 摘要</button>
-              <button class="btn primary" data-action="export-xls">匯出 Excel</button>
             </div>
           </div>
         </header>
@@ -870,26 +868,57 @@ function renderQuickEntryModal() {
   `;
 }
 
+function sellTypeForTransaction(transaction = {}) {
+  return transaction.borrowRebuyType === SELL_TYPE_BORROW ? SELL_TYPE_BORROW : SELL_TYPE_REGULAR;
+}
+
+function sellTypeLabel(sellType) {
+  return sellType === SELL_TYPE_BORROW ? "庫存借券" : "一般賣出";
+}
+
+function resolveSellMatchingFields(data = {}) {
+  const requestedType = String(data.sellType || data.borrowRebuyType || "").trim().toUpperCase();
+  const sellType = requestedType === SELL_TYPE_BORROW ? SELL_TYPE_BORROW : SELL_TYPE_REGULAR;
+  return {
+    sellType,
+    borrowRebuyType: sellType === SELL_TYPE_BORROW ? SELL_TYPE_BORROW : "",
+    linkedBuyTransactionId: sellType === SELL_TYPE_REGULAR ? String(data.linkedBuyTransactionId || "").trim() : "",
+    sourceInventoryLotId: sellType === SELL_TYPE_BORROW ? String(data.sourceInventoryLotId || "").trim() : ""
+  };
+}
+
+function clearMatchPickerField(field) {
+  if (!field) return;
+  const input = field.querySelector('input[type="hidden"]');
+  if (input) input.value = "";
+  for (const button of field.querySelectorAll('[data-action="toggle-match-lot"]')) {
+    button.classList.remove("selected");
+    button.setAttribute("aria-pressed", "false");
+  }
+}
+
 function renderQuickTradeFields(type, entry, defaultSymbol, defaultName, accountId) {
   const linkedOptions = quickSellLotOptions(accountId, defaultSymbol);
   const excludedSellId = entry.id || "";
   const borrowSourceOptions = borrowSourceLotOptions(accountId, defaultSymbol, entry.sourceInventoryLotId || "", excludedSellId);
   const linkedValue = entry.linkedBuyTransactionId || "";
-  const borrowRebuyType = entry.borrowRebuyType || "";
+  const sellType = sellTypeForTransaction(entry);
   
   let sellFields = "";
   if (type === "SELL") {
     sellFields = `
-      <div class="field"><label>賣出類型</label><select name="borrowRebuyType">
-        <option value="" ${borrowRebuyType !== "BORROW_SELL" ? "selected" : ""}>一般賣出</option>
-        <option value="BORROW_SELL" ${borrowRebuyType === "BORROW_SELL" ? "selected" : ""}>自有庫存借券賣出</option>
+      <div class="field"><label>賣出方式</label><select name="sellType">
+        <option value="${SELL_TYPE_REGULAR}" ${sellType === SELL_TYPE_REGULAR ? "selected" : ""}>一般賣出（扣減庫存）</option>
+        <option value="${SELL_TYPE_BORROW}" ${sellType === SELL_TYPE_BORROW ? "selected" : ""}>自有庫存借券賣出（建立回補）</option>
       </select></div>
-      <div class="field full" data-sell-normal-match-field ${borrowRebuyType === "BORROW_SELL" ? "hidden" : ""}>
-        <label>手動配對買進庫存 (一般賣出)</label>
+      <div class="field full" data-sell-normal-match-field ${sellType === SELL_TYPE_BORROW ? "hidden" : ""}>
+        <label>配對買進庫存</label>
+        <small class="field-hint">只顯示同帳戶、同股票且賣出日前仍可用的庫存；未選時依既有規則自動配對。</small>
         ${renderMatchLotPicker(linkedOptions, linkedValue, `<input type="hidden" name="linkedBuyTransactionId" value="${escapeAttr(linkedValue)}" />`, "沒有可配對的買進庫存")}
       </div>
-      <div class="field full" data-sell-borrow-match-field ${borrowRebuyType !== "BORROW_SELL" ? "hidden" : ""}>
-        <label>借券來源庫存 (可多選，先點先扣)</label>
+      <div class="field full" data-sell-borrow-match-field ${sellType !== SELL_TYPE_BORROW ? "hidden" : ""}>
+        <label>借券來源庫存</label>
+        <small class="field-hint">可多選，依點選順序保留庫存，並建立後續回補任務。</small>
         ${renderMatchLotPicker(borrowSourceOptions, entry.sourceInventoryLotId || "", `<input type="hidden" name="sourceInventoryLotId" data-match-buy value="${escapeAttr(entry.sourceInventoryLotId || "")}" />`, "目前無可借出的持股庫存")}
       </div>
     `;
@@ -1717,12 +1746,13 @@ function renderMatching() {
     <section class="section">
       <div class="section-title"><div><h2>買賣配對</h2><p>先看買入/賣出主資訊，點開看費稅與配對細節，修改再重選配對順序</p></div></div>
       ${renderTable(
-        [["sell", "賣出"], ["buy", "買入"], ["shares", "股數"], ["profit", "淨利"], ["detail", "詳細"]],
+        [["type", "類型"], ["sell", "賣出"], ["buy", "買入 / 回補"], ["shares", "股數"], ["profit", "淨利"], ["detail", "詳細"]],
         sells.map((sell) => {
           const matches = getMatchesForSell(sell);
           const matchedShares = sum(matches, "matchedShares");
           const netProfit = sum(matches, "netProfit");
           return {
+            type: `<span class="status info">${escapeHtml(sellTypeLabel(sellTypeForTransaction(sell)))}</span>`,
             sell: renderMatchSellSummary(sell),
             buy: renderMatchBuySummary(matches),
             shares: `<span class="match-shares-summary"><strong>${fmtNum(matchedShares)}</strong><small>/ ${fmtNum(sell.shares)}股</small></span>`,
@@ -1774,7 +1804,7 @@ function renderMatchingMobileRow(sell, matches, matchedShares, netProfit) {
       <summary>
         <span class="match-profit-hero"><small>淨利</small><strong class="${netProfit >= 0 ? "positive" : "negative"}">${fmtMoney(netProfit)}</strong></span>
         <span class="match-side-card buy"><small>買進</small><strong>${escapeHtml(matchBuySummaryText(matches))}</strong></span>
-        <span class="match-side-card sell"><small>賣出</small><strong>@ ${fmtPrice(sell.price)}</strong></span>
+        <span class="match-side-card sell"><small>${escapeHtml(sellTypeLabel(sellTypeForTransaction(sell)))}</small><strong>@ ${fmtPrice(sell.price)}</strong></span>
         <span class="match-shares-card"><small>股數</small><strong>${fmtNum(matchedShares)} / ${fmtNum(sell.shares)}</strong></span>
       </summary>
       <div class="mobile-transaction-detail match-detail-mobile">
@@ -1813,6 +1843,7 @@ function renderMatchingDetailContent(sell, matches) {
       <div><span>股票</span><strong>${escapeHtml(securityLabel(sell.securityId))}</strong></div>
       <div><span>券商帳戶</span><strong>${escapeHtml(accountName(sell.brokerAccountId))}</strong></div>
       <div><span>賣出日期</span><strong>${escapeHtml(sell.tradeDate)}</strong></div>
+      <div><span>賣出類型</span><strong>${escapeHtml(sellTypeLabel(sellTypeForTransaction(sell)))}</strong></div>
       <div><span>賣出價</span><strong>${fmtPrice(sell.price)}</strong></div>
       <div><span>賣出股數</span><strong>${fmtNum(sell.shares)}</strong></div>
       <div><span>已配股數</span><strong>${fmtNum(matchedShares)}</strong></div>
@@ -3102,12 +3133,14 @@ function onChange(event) {
     }
     return;
   }
-  if (event.target.name === "borrowRebuyType") {
+  if (event.target.name === "sellType") {
     const sheet = event.target.closest(".quick-entry-sheet");
     const normalField = sheet?.querySelector("[data-sell-normal-match-field]");
     const borrowField = sheet?.querySelector("[data-sell-borrow-match-field]");
-    if (normalField) normalField.hidden = event.target.value === "BORROW_SELL";
-    if (borrowField) borrowField.hidden = event.target.value !== "BORROW_SELL";
+    const isBorrow = event.target.value === SELL_TYPE_BORROW;
+    if (normalField) normalField.hidden = isBorrow;
+    if (borrowField) borrowField.hidden = !isBorrow;
+    clearMatchPickerField(isBorrow ? normalField : borrowField);
     return;
   }
   if (event.target.name === "buyType") {
@@ -3587,9 +3620,11 @@ async function handleQuickEntrySubmit(data) {
       let rebuySellIds = [];
 
       if (type === "SELL") {
-        borrowRebuyType = String(data.borrowRebuyType || "").trim();
+        const sellFields = resolveSellMatchingFields(data);
+        borrowRebuyType = sellFields.borrowRebuyType;
+        data.linkedBuyTransactionId = sellFields.linkedBuyTransactionId;
         if (borrowRebuyType === "BORROW_SELL") {
-          sourceInventoryLotId = validateBorrowSellSourceLots(data.sourceInventoryLotId, data.shares, account, securityForCosts.id, portfolioId, data.id);
+          sourceInventoryLotId = validateBorrowSellSourceLots(sellFields.sourceInventoryLotId, data.shares, account, securityForCosts.id, portfolioId, data.id);
         }
       } else if (type === "BUY") {
         const buyType = String(data.buyType || "").trim();
@@ -3632,7 +3667,7 @@ async function handleQuickEntrySubmit(data) {
       tx.fee = fee;
       tx.tax = tax;
       tx.strategyCategory = buyIntent === "REBUY" ? "REBUY" : data.strategyCategory || (type === "BUY" ? "TRADING" : "LONG_TERM");
-      tx.linkedBuyTransactionId = borrowRebuyType === "BORROW_SELL" ? "" : (data.linkedBuyTransactionId || "");
+      tx.linkedBuyTransactionId = borrowRebuyType === SELL_TYPE_BORROW ? "" : (data.linkedBuyTransactionId || "");
       tx.rebuySellTransactionIds = buyIntent === "REBUY" ? rebuySellIds.join(",") : "";
       tx.buyIntent = type === "BUY" ? buyIntent : "";
       tx.borrowRebuyType = borrowRebuyType;
@@ -3683,9 +3718,11 @@ async function handleQuickEntrySubmit(data) {
   let rebuySellIds = [];
 
   if (type === "SELL") {
-    borrowRebuyType = String(data.borrowRebuyType || "").trim();
+    const sellFields = resolveSellMatchingFields(data);
+    borrowRebuyType = sellFields.borrowRebuyType;
+    data.linkedBuyTransactionId = sellFields.linkedBuyTransactionId;
     if (borrowRebuyType === "BORROW_SELL") {
-      sourceInventoryLotId = validateBorrowSellSourceLots(data.sourceInventoryLotId, data.shares, account, securityForCosts.id, portfolioId);
+      sourceInventoryLotId = validateBorrowSellSourceLots(sellFields.sourceInventoryLotId, data.shares, account, securityForCosts.id, portfolioId);
     }
   } else if (type === "BUY") {
     const buyType = String(data.buyType || "").trim();
@@ -3728,7 +3765,7 @@ async function handleQuickEntrySubmit(data) {
     fee,
     tax,
     strategyCategory: buyIntent === "REBUY" ? "REBUY" : data.strategyCategory || (type === "BUY" ? "TRADING" : "LONG_TERM"),
-    linkedBuyTransactionId: borrowRebuyType === "BORROW_SELL" ? "" : (data.linkedBuyTransactionId || ""),
+    linkedBuyTransactionId: borrowRebuyType === SELL_TYPE_BORROW ? "" : (data.linkedBuyTransactionId || ""),
     rebuySellTransactionIds: buyIntent === "REBUY" ? rebuySellIds.join(",") : "",
     buyIntent: type === "BUY" ? buyIntent : "",
     borrowRebuyType,
