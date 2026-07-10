@@ -2512,7 +2512,7 @@ function renderPnlReport(model) {
       ${metricCard("本年費稅", fmtMoney(model.yearSummary.costs), "amber")}
     </section>
     <section class="two-col report-chart-grid">
-      <div class="section"><div class="section-title"><div><h2>本月每日已實現損益</h2><p>依賣出配對日彙總毛利、費稅與淨利。</p></div></div><div class="bar-list">${model.monthDailyRows.length ? model.monthDailyRows.map((row) => pdfBarRow(row.period, row.net, Math.max(...model.monthDailyRows.map((item) => Math.abs(item.net)), 1))).join("") : `<div class="empty">本月尚無已實現損益</div>`}</div></div>
+      <div class="section"><div class="section-title"><div><h2>本月每日已實現損益</h2><p>依一般賣出配對日與借券回補成交日彙總毛利、費稅與淨利。</p></div></div><div class="bar-list">${model.monthDailyRows.length ? model.monthDailyRows.map((row) => pdfBarRow(row.period, row.net, Math.max(...model.monthDailyRows.map((item) => Math.abs(item.net)), 1))).join("") : `<div class="empty">本月尚無已實現損益</div>`}</div></div>
       <div class="section"><div class="section-title"><div><h2>年度月別淨利</h2><p>檢查每個月份對年度損益的貢獻。</p></div></div><div class="bar-list">${model.yearMonthlyRows.length ? model.yearMonthlyRows.map((row) => pdfBarRow(row.period, row.net, Math.max(...model.yearMonthlyRows.map((item) => Math.abs(item.net)), 1))).join("") : `<div class="empty">本年尚無已實現損益</div>`}</div></div>
     </section>
     <section class="section"><div class="section-title"><div><h2>未實現庫存損益</h2><p>用目前報價或成本估值，檢查庫存尚未實現的盈虧。</p></div></div>${renderTable([["security", "股票"], ["shares", "股數"], ["cost", "剩餘成本"], ["marketValue", "估值"], ["unrealized", "未實現"], ["concentration", "佔比"]], inventoryRows, "目前沒有庫存")}</section>
@@ -6132,16 +6132,18 @@ function downloadReportHtml(html, model) {
 function buildPdfReportModel(portfolioId, brokerAccountId = reportBrokerAccountId(portfolioId)) {
   const transactions = scopedTransactions(portfolioId).filter((tx) => reportAccountMatches(tx, brokerAccountId)).slice().sort(sortByDateAsc);
   const matches = state.sellMatches.filter((match) => match.portfolioId === portfolioId && reportAccountMatches(match, brokerAccountId)).slice().sort((a, b) => String(a.sellDate || "").localeCompare(String(b.sellDate || "")));
+  const profitEvents = realizedProfitEvents(portfolioId, brokerAccountId);
   if (!transactions.length && !matches.length) throw new Error("沒有可產生報告的交易資料");
-  const reportDate = latestReportDate(transactions, matches);
+  const reportDate = latestReportDate(transactions, profitEvents);
   const reportMonth = reportDate.slice(0, 7);
   const reportYear = reportDate.slice(0, 4);
   const dayTransactions = transactions.filter((tx) => tx.tradeDate === reportDate).sort(reportTransactionSort);
   const dayMatches = matches.filter((match) => match.sellDate === reportDate);
-  const monthMatches = matches.filter((match) => String(match.sellDate || "").startsWith(reportMonth));
-  const yearMatches = matches.filter((match) => String(match.sellDate || "").startsWith(reportYear));
-  const monthDailyRows = summarizeMatchesBy(matches.filter((match) => String(match.sellDate || "").startsWith(reportMonth)), (match) => match.sellDate);
-  const yearMonthlyRows = summarizeMatchesBy(yearMatches, (match) => String(match.sellDate || "").slice(0, 7));
+  const dayProfitEvents = profitEvents.filter((event) => event.date === reportDate);
+  const monthProfitEvents = profitEvents.filter((event) => String(event.date || "").startsWith(reportMonth));
+  const yearProfitEvents = profitEvents.filter((event) => String(event.date || "").startsWith(reportYear));
+  const monthDailyRows = summarizeProfitEventsBy(monthProfitEvents, (event) => event.date);
+  const yearMonthlyRows = summarizeProfitEventsBy(yearProfitEvents, (event) => String(event.date || "").slice(0, 7));
   const inventoryLots = state.buyLots
     .filter((lot) => lot.portfolioId === portfolioId && reportAccountMatches(lot, brokerAccountId) && toNumber(lot.remainingShares) > 0)
     .slice()
@@ -6159,13 +6161,16 @@ function buildPdfReportModel(portfolioId, brokerAccountId = reportBrokerAccountI
     dateRange: reportDateRange(transactions),
     transactions,
     matches,
+    profitEvents,
     dayTransactions,
     dayMatches,
+    dayProfitEvents,
+    dayBorrowRebuyEvents: dayProfitEvents.filter((event) => event.type === "BORROW_REBUY"),
     monthDailyRows,
     yearMonthlyRows,
-    daySummary: summarizeReportMatches(dayMatches, reportDate),
-    monthSummary: summarizeReportMatches(monthMatches, reportMonth),
-    yearSummary: summarizeReportMatches(yearMatches, reportYear),
+    daySummary: summarizeProfitEvents(dayProfitEvents, reportDate),
+    monthSummary: summarizeProfitEvents(monthProfitEvents, reportMonth),
+    yearSummary: summarizeProfitEvents(yearProfitEvents, reportYear),
     inventoryLots,
     assetSeries,
     holdingSeries,
@@ -6186,6 +6191,51 @@ function buildPdfReportModel(portfolioId, brokerAccountId = reportBrokerAccountI
     benchmark: build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inventoryLots, reportDate)
   };
 }
+
+function realizedProfitEvents(portfolioId, brokerAccountId = "ALL") {
+  const events = [];
+  for (const match of state.sellMatches.filter((item) => item.portfolioId === portfolioId && reportAccountMatches(item, brokerAccountId))) {
+    const costs = roundMoney(toNumber(match.allocatedBuyFee) + toNumber(match.allocatedSellFee) + toNumber(match.allocatedSellTax));
+    events.push({
+      id: "sell-match:" + match.id,
+      type: "SELL_MATCH",
+      date: match.sellDate,
+      shares: toNumber(match.matchedShares),
+      grossProfit: toNumber(match.grossProfit),
+      costs,
+      netProfit: toNumber(match.netProfit),
+      buyDate: match.buyDate,
+      buyPrice: match.buyPrice,
+      sellDate: match.sellDate,
+      sellPrice: match.sellPrice
+    });
+  }
+
+  for (const cycle of state.borrowRebuyCycles || []) {
+    const sell = state.appTransactions.find((tx) => tx.id === cycle.sellTradeId);
+    if (!sell || sell.portfolioId !== portfolioId || !reportAccountMatches(sell, brokerAccountId)) continue;
+    for (const rebuyMatch of cycle.rebuyMatches || []) {
+      const grossProfit = toNumber(rebuyMatch.grossProfit);
+      const netProfit = toNumber(rebuyMatch.netProfit);
+      events.push({
+        id: "borrow-rebuy:" + cycle.id + ":" + (rebuyMatch.rebuyTradeId || (rebuyMatch.rebuyDate + "-" + events.length)),
+        type: "BORROW_REBUY",
+        date: rebuyMatch.rebuyDate,
+        shares: toNumber(rebuyMatch.rebuyQty),
+        grossProfit,
+        costs: roundMoney(grossProfit - netProfit),
+        netProfit,
+        sourceSellDate: sell.tradeDate,
+        sellPrice: sell.price,
+        rebuyPrice: rebuyMatch.rebuyPrice,
+        cycleId: cycle.id
+      });
+    }
+  }
+
+  return events.sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")) || String(a.id || "").localeCompare(String(b.id || "")));
+}
+
 function build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inventoryLots, reportDate) {
   const security = benchmarkSecurity(portfolioId);
   const fractionalShareRatio = 0.98;
@@ -6381,10 +6431,10 @@ function reportAssetSeries(portfolioId, transactions, brokerAccountId = "ALL") {
     };
   });
 }
-function latestReportDate(transactions, matches) {
+function latestReportDate(transactions, profitItems = []) {
   const dates = [
     ...transactions.map((tx) => tx.tradeDate),
-    ...matches.map((match) => match.sellDate)
+    ...profitItems.map((item) => item.date || item.sellDate)
   ].filter(Boolean).sort();
   return dates[dates.length - 1] || today();
 }
@@ -6400,26 +6450,26 @@ function reportTransactionSort(a, b) {
   return (order[a.transactionType] || 9) - (order[b.transactionType] || 9) || String(a.createdAt || a.id).localeCompare(String(b.createdAt || b.id));
 }
 
-function summarizeMatchesBy(matches, keyFn) {
+function summarizeProfitEventsBy(events, keyFn) {
   const groups = new Map();
-  for (const match of matches) {
-    const key = keyFn(match) || "-";
+  for (const event of events) {
+    const key = keyFn(event) || "-";
     if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(match);
+    groups.get(key).push(event);
   }
   return Array.from(groups.entries())
-    .map(([period, rows]) => summarizeReportMatches(rows, period))
+    .map(([period, rows]) => summarizeProfitEvents(rows, period))
     .sort((a, b) => String(a.period).localeCompare(String(b.period)));
 }
 
-function summarizeReportMatches(matches, period) {
+function summarizeProfitEvents(events, period) {
   return {
     period,
-    trades: matches.length,
-    shares: reportSum(matches, (match) => match.matchedShares),
-    gross: reportSum(matches, (match) => match.grossProfit),
-    costs: reportSum(matches, (match) => toNumber(match.allocatedBuyFee) + toNumber(match.allocatedSellFee) + toNumber(match.allocatedSellTax)),
-    net: reportSum(matches, (match) => match.netProfit)
+    trades: events.length,
+    shares: reportSum(events, (event) => event.shares),
+    gross: reportSum(events, (event) => event.grossProfit),
+    costs: reportSum(events, (event) => event.costs),
+    net: reportSum(events, (event) => event.netProfit)
   };
 }
 
@@ -6453,9 +6503,9 @@ function buildPrettyPdfReportHtml(model) {
   </header>
 
   <div class="kpi-grid">
-    ${pdfKpi("當日已實現淨利", pdfSignedMoney(model.daySummary.net), `${fmtNum(model.daySummary.trades)} 筆賣出 / ${fmtNum(model.daySummary.shares)} 股`)}
-    ${pdfKpi(`${model.reportMonth} 月累計`, pdfSignedMoney(model.monthSummary.net), `${fmtNum(model.monthSummary.shares)} 股已配對`)}
-    ${pdfKpi(`${model.reportYear} 年累計`, pdfSignedMoney(model.yearSummary.net), `${fmtNum(model.yearSummary.trades)} 筆賣出配對`)}
+    ${pdfKpi("當日已實現淨利", pdfSignedMoney(model.daySummary.net), `${fmtNum(model.daySummary.trades)} 筆已實現 / ${fmtNum(model.daySummary.shares)} 股`)}
+    ${pdfKpi(`${model.reportMonth} 月累計`, pdfSignedMoney(model.monthSummary.net), `${fmtNum(model.monthSummary.shares)} 股已實現`)}
+    ${pdfKpi(`${model.reportYear} 年累計`, pdfSignedMoney(model.yearSummary.net), `${fmtNum(model.yearSummary.trades)} 筆已實現事件`)}
     ${pdfKpi("操作後等效 0050", `${fmtNum(model.benchmark.operationEquivalentShares, 2)} 股`, `實際 ${fmtNum(model.benchmark.actualShares)} 股 / 現金 ${fmtNum(model.benchmark.cashEquivalentShares, 2)} 股`)}
   </div>
 
@@ -6480,12 +6530,12 @@ function buildPrettyPdfReportHtml(model) {
   </section>
 
   <section>
-    <div class="section-title"><div><h2>當日獲利摘要</h2><div class="hint">每日獲利以已配對賣出計算，未賣出的庫存不列入已實現。</div></div><span class="pill">${escapeHtml(model.reportDate)}</span></div>
+    <div class="section-title"><div><h2>當日獲利摘要</h2><div class="hint">每日獲利包含一般賣出配對與已完成的借券回補；未完成回補與未賣出的庫存不列入已實現。</div></div><span class="pill">${escapeHtml(model.reportDate)}</span></div>
     ${pdfReportTable(["日期", "配對筆數", "配對股數", "毛利", "費稅", "淨利"], [[model.daySummary.period, fmtNum(model.daySummary.trades), fmtNum(model.daySummary.shares), fmtMoney(model.daySummary.gross), fmtMoney(model.daySummary.costs), pdfSignedMoney(model.daySummary.net)]], [1,2,3,4,5])}
   </section>
 
   <section>
-    <div class="section-title"><div><h2>當日賣出配對明細</h2><div class="hint">淨利 = 賣出價差 - 買入分攤手續費 - 賣出手續費 - 交易稅。</div></div><span class="pill">${fmtNum(model.daySummary.shares)} 股</span></div>
+    <div class="section-title"><div><h2>當日一般賣出配對明細</h2><div class="hint">淨利 = 賣出價差 - 買入分攤手續費 - 賣出手續費 - 交易稅。</div></div><span class="pill">${fmtNum(reportSum(model.dayMatches, (match) => match.matchedShares))} 股</span></div>
     ${pdfReportTable(["原買進日", "買進價", "賣出價", "股數", "毛利", "費稅", "淨利"], model.dayMatches.map((match) => [match.buyDate, fmtPrice(match.buyPrice), fmtPrice(match.sellPrice), fmtNum(match.matchedShares), fmtMoney(match.grossProfit), fmtMoney(toNumber(match.allocatedBuyFee) + toNumber(match.allocatedSellFee) + toNumber(match.allocatedSellTax)), pdfSignedMoney(match.netProfit)]), [3,4,5,6], "當日沒有已配對賣出")}
   </section>
 
@@ -7018,8 +7068,8 @@ function profitSummaryReportRows(grain, portfolioId, brokerAccountId = "ALL") {
     row.fees += toNumber(fees);
     row.net += toNumber(net);
   };
-  for (const match of state.sellMatches.filter((item) => item.portfolioId === portfolioId && reportAccountMatches(item, brokerAccountId))) {
-    addProfitRow(match.sellDate, match.matchedShares, match.grossProfit, toNumber(match.allocatedBuyFee) + toNumber(match.allocatedSellFee) + toNumber(match.allocatedSellTax), match.netProfit);
+  for (const event of realizedProfitEvents(portfolioId, brokerAccountId)) {
+    addProfitRow(event.date, event.shares, event.grossProfit, event.costs, event.netProfit);
   }
   const tasksById = new Map(state.rebuyTasks.map((task) => [task.id, task]));
   for (const fill of state.rebuyFills.filter((item) => item.portfolioId === portfolioId)) {
@@ -7500,7 +7550,7 @@ function portfolioMetrics(portfolioId, brokerAccountId = "ALL") {
   return {
     cash: cashBalance(portfolioId, brokerAccountId || "ALL"),
     remainingShares: sum(state.buyLots.filter((lot) => lot.portfolioId === portfolioId && inAccount(lot)), "remainingShares"),
-    realizedNetProfit: sum(state.sellMatches.filter((match) => match.portfolioId === portfolioId && inAccount(match)), "netProfit"),
+    realizedNetProfit: sum(realizedProfitEvents(portfolioId, accountScoped ? brokerAccountId : "ALL"), "netProfit"),
     openRebuyShares: sum(state.rebuyTasks.filter((task) => task.portfolioId === portfolioId && inAccount(task) && ["OPEN", "PARTIAL_FILLED"].includes(task.status)), "remainingRebuyShares")
   };
 }
@@ -7608,7 +7658,7 @@ function accountSummaries(portfolioId) {
         cash: sum(state.cashLedger.filter((row) => row.brokerAccountId === account.id), "amount"),
         shares: remainingShares,
         avgCost: remainingShares ? remainingCost / remainingShares : 0,
-        realized: sum(state.sellMatches.filter((match) => match.brokerAccountId === account.id), "netProfit"),
+        realized: sum(realizedProfitEvents(portfolioId, account.id), "netProfit"),
         rebuy: sum(state.rebuyTasks.filter((task) => task.brokerAccountId === account.id && ["OPEN", "PARTIAL_FILLED"].includes(task.status)), "remainingRebuyShares"),
         issues: state.reconciliationLinks.filter((link) => link.brokerAccountId === account.id && !["MATCHED", "AUTO_GROUP_MATCHED"].includes(link.matchStatus)).length,
         lastImport: imports.length ? formatDateTime(imports.sort((a, b) => b.importedAt.localeCompare(a.importedAt))[0].importedAt) : "-"
@@ -7708,9 +7758,9 @@ function dailyCashSeries(portfolioId, brokerAccountId = "ALL") {
     if (!days.has(row.tradeDate)) days.set(row.tradeDate, { date: row.tradeDate, cash: 0, realized: 0 });
     days.get(row.tradeDate).cash += row.amount;
   }
-  for (const match of state.sellMatches.filter((item) => item.portfolioId === portfolioId && (!accountScoped || item.brokerAccountId === brokerAccountId))) {
-    if (!days.has(match.sellDate)) days.set(match.sellDate, { date: match.sellDate, cash: 0, realized: 0 });
-    days.get(match.sellDate).realized += match.netProfit;
+  for (const event of realizedProfitEvents(portfolioId, accountScoped ? brokerAccountId : "ALL")) {
+    if (!days.has(event.date)) days.set(event.date, { date: event.date, cash: 0, realized: 0 });
+    days.get(event.date).realized += event.netProfit;
   }
   let cash = 0;
   let realized = 0;
