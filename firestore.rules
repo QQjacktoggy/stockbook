@@ -3,15 +3,62 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /stockLedgers/{ledgerId} {
-      allow read: if request.auth != null
-        && resource.data.ownerUid == request.auth.uid;
-      allow create, update: if request.auth != null
-        && request.resource.data.ownerUid == request.auth.uid;
+      function signedIn() {
+        return request.auth != null;
+      }
+
+      function hasVerifiedEmail() {
+        return signedIn()
+          && request.auth.token.email != null
+          && request.auth.token.email_verified == true;
+      }
+
+      function ownsExistingLedger() {
+        return signedIn()
+          && (resource.data.ownerUid == request.auth.uid
+            || (hasVerifiedEmail()
+              && resource.data.ownerEmail == request.auth.token.email));
+      }
+
+      function ownsNewLedger() {
+        return signedIn()
+          && request.resource.data.ownerUid == request.auth.uid
+          && hasVerifiedEmail()
+          && request.resource.data.ownerEmail == request.auth.token.email;
+      }
+
+      allow read: if ownsExistingLedger();
+      allow create: if ownsNewLedger();
+      allow update: if ownsExistingLedger() && ownsNewLedger();
         
       match /chunks/{chunkId} {
-        allow read, write: if request.auth != null
-          && (resource == null || resource.data.ownerUid == request.auth.uid)
-          && (request.resource == null || request.resource.data.ownerUid == request.auth.uid);
+        function parentBefore() {
+          return get(/databases/$(database)/documents/stockLedgers/$(ledgerId));
+        }
+
+        function parentAfter() {
+          return getAfter(/databases/$(database)/documents/stockLedgers/$(ledgerId));
+        }
+
+        function ownsParentBefore() {
+          return signedIn()
+            && (parentBefore().data.ownerUid == request.auth.uid
+              || (hasVerifiedEmail()
+                && parentBefore().data.ownerEmail == request.auth.token.email));
+        }
+
+        function ownsParentAfter() {
+          return signedIn()
+            && parentAfter().data.ownerUid == request.auth.uid
+            && hasVerifiedEmail()
+            && parentAfter().data.ownerEmail == request.auth.token.email;
+        }
+
+        allow read: if signedIn()
+          && (resource.data.ownerUid == request.auth.uid || ownsParentBefore());
+        allow create, update: if ownsParentAfter()
+          && request.resource.data.ownerUid == request.auth.uid;
+        allow delete: if ownsParentAfter();
       }
     }
   }

@@ -110,6 +110,7 @@ let state = loadState();
 let firebaseRuntime = null;
 let firebaseAutoSyncTimer = null;
 let firebaseAutoSyncInFlight = false;
+let firebaseAutoSyncQueued = false;
 let autoQuoteSyncStarted = false;
 
 window.addEventListener("hashchange", render);
@@ -3007,7 +3008,7 @@ async function onClick(event) {
     if (action === "delete-import-batch") return handleDeleteImportBatch(actionButton.dataset.id);
     if (action === "sell-lot") return handleSellLot(actionButton.dataset.buyId);
     if (action === "open-quote-sync") return handleOpenQuoteSync();
-    if (action === "sync-yahoo-quotes") return handleYahooQuoteSync();
+    if (action === "sync-yahoo-quotes") return await handleYahooQuoteSync();
     if (action === "edit-portfolio") return handleEditPortfolio(actionButton.dataset.id);
     if (action === "delete-portfolio") return handleDeletePortfolio(actionButton.dataset.id);
     if (action === "edit-broker") return handleEditBroker(actionButton.dataset.id);
@@ -3959,7 +3960,7 @@ function handleQuoteSync(data) {
   const updateIds = new Set(updates.map((quote) => quote.id));
   const before = clone(state.marketQuotes.filter((quote) => updateIds.has(quote.id)));
   state.marketQuotes = state.marketQuotes.filter((quote) => !updateIds.has(quote.id)).concat(updates);
-  auditLog("UPDATE", "market_quote", portfolioId, before, updates, portfolioId);
+  auditLog("UPDATE", "market_quote", portfolioId, marketQuoteAuditSnapshot(before), marketQuoteAuditSnapshot(updates), portfolioId);
   commit("現價已更新");
 }
 async function handleYahooQuoteSync(options = {}) {
@@ -4005,7 +4006,7 @@ async function handleYahooQuoteSync(options = {}) {
   const updateIds = new Set(updates.map((quote) => quote.id));
   const before = clone(state.marketQuotes.filter((quote) => updateIds.has(quote.id)));
   state.marketQuotes = state.marketQuotes.filter((quote) => !updateIds.has(quote.id)).concat(updates);
-  auditLog("UPDATE", "market_quote", portfolioId, before, updates, portfolioId);
+  auditLog("UPDATE", "market_quote", portfolioId, marketQuoteAuditSnapshot(before), marketQuoteAuditSnapshot(updates), portfolioId);
   if (silent) {
     persist();
     render();
@@ -5868,18 +5869,17 @@ function canAutoSyncFirebase() {
 
 function scheduleFirebaseAutoSync() {
   if (!canAutoSyncFirebase()) return;
+  firebaseAutoSyncQueued = true;
   window.clearTimeout(firebaseAutoSyncTimer);
   state.settings.firebase.status = "PENDING";
   persist();
-  firebaseAutoSyncTimer = window.setTimeout(runFirebaseAutoSync, 900);
+  if (!firebaseAutoSyncInFlight) firebaseAutoSyncTimer = window.setTimeout(runFirebaseAutoSync, 900);
 }
 
 async function runFirebaseAutoSync() {
-  if (!canAutoSyncFirebase()) return;
-  if (firebaseAutoSyncInFlight) {
-    scheduleFirebaseAutoSync();
-    return;
-  }
+  if (!canAutoSyncFirebase()) { firebaseAutoSyncQueued = false; return; }
+  if (firebaseAutoSyncInFlight) return;
+  firebaseAutoSyncQueued = false;
   firebaseAutoSyncInFlight = true;
   try {
     await smartFirebaseSync({ silent: true });
@@ -5891,6 +5891,10 @@ async function runFirebaseAutoSync() {
     showToast(`Firebase 自動同步失敗：${formatFirebaseError(error)}`);
   } finally {
     firebaseAutoSyncInFlight = false;
+    if (firebaseAutoSyncQueued && canAutoSyncFirebase()) {
+      window.clearTimeout(firebaseAutoSyncTimer);
+      firebaseAutoSyncTimer = window.setTimeout(runFirebaseAutoSync, 250);
+    }
   }
 }
 // Gzip compression and decompression helper functions
@@ -5946,7 +5950,17 @@ async function smartFirebaseSync(options = {}) {
   requireFirebaseUser(runtime);
   const namespace = firebaseNamespace();
   const local = exportCurrentUserState();
-  const remote = await readFirebaseState(runtime, namespace);
+  let remote;
+  try {
+    remote = await readFirebaseState(runtime, namespace);
+  } catch (error) {
+    if (/^同步載入失敗：缺少資料區塊/.test(String(error?.message || error))) {
+      console.warn("Firebase 帳本分塊不完整，改用本機資料重建同步內容", error);
+      await syncToFirebase(options);
+      return;
+    }
+    throw error;
+  }
   if (remote && ledgerContentScore(remote) > ledgerContentScore(local)) {
     mergeCurrentUserState(remote);
     state.settings.firebase.lastSyncAt = nowIso();
@@ -5976,7 +5990,8 @@ async function syncToFirebase(options = {}) {
   }
 
   const ref = runtime.doc(runtime.db, "stockLedgers", namespace);
-  await runtime.setDoc(ref, {
+  const batch = runtime.writeBatch(runtime.db);
+  batch.set(ref, {
     namespace,
     ownerUid: runtime.auth.currentUser.uid,
     ownerEmail: currentUser().email,
@@ -5987,7 +6002,7 @@ async function syncToFirebase(options = {}) {
 
   for (let i = 0; i < chunks.length; i++) {
     const chunkRef = runtime.doc(runtime.db, "stockLedgers", namespace, "chunks", `chunk_${i}`);
-    await runtime.setDoc(chunkRef, {
+    batch.set(chunkRef, {
       index: i,
       data: chunks[i],
       ownerUid: runtime.auth.currentUser.uid,
@@ -5998,12 +6013,9 @@ async function syncToFirebase(options = {}) {
   // Clean up any old chunks from prior syncs
   for (let i = chunks.length; i < chunks.length + 15; i++) {
     const leftoverRef = runtime.doc(runtime.db, "stockLedgers", namespace, "chunks", `chunk_${i}`);
-    try {
-      await runtime.deleteDoc(leftoverRef);
-    } catch (e) {
-      // Ignore errors if chunk does not exist
-    }
+    batch.delete(leftoverRef);
   }
+  await batch.commit();
 
   state.settings.firebase.lastSyncAt = nowIso();
   state.settings.firebase.status = "SYNCED";
@@ -7937,6 +7949,18 @@ function auditLog(action, entityType, entityId, beforeJson, afterJson, portfolio
     afterJson: clone(afterJson),
     createdAt: nowIso()
   });
+}
+
+function marketQuoteAuditSnapshot(quotes) {
+  return (quotes || []).map((quote) => ({
+    id: quote.id,
+    symbol: quote.symbol,
+    price: quote.price,
+    quoteTime: quote.quoteTime,
+    source: quote.source,
+    sourceDate: quote.sourceDate,
+    updatedAt: quote.updatedAt
+  }));
 }
 
 function drawDashboardCharts() {
