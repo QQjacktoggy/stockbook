@@ -4570,3 +4570,77 @@ td {
     grid-template-columns: 1fr;
   }
 }
+
+/* Mobile inventory/report layout fixes */
+.report-export-actions {
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+@media (max-width: 860px) {
+  .inventory-lot-card summary {
+    grid-template-columns: minmax(88px, 1.15fr) minmax(50px, 0.65fr) minmax(58px, 0.74fr) minmax(58px, 0.74fr);
+    row-gap: 7px;
+    padding-right: 10px;
+  }
+
+  .inventory-lot-card .lot-status {
+    position: static;
+    grid-column: 1 / -1;
+    justify-self: end;
+    max-width: 100%;
+  }
+
+  .inventory-lot-card .lot-status .status {
+    max-width: 100%;
+    white-space: nowrap;
+  }
+
+  .transaction-filter-compact {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .transaction-search-wrap {
+    width: 44px;
+    min-height: 44px;
+    border-radius: 16px;
+  }
+
+  .transaction-search-wrap > input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .transaction-search-wrap .transaction-filter-details summary {
+    width: 44px;
+    min-height: 44px;
+    border-left: 0;
+    border-radius: 16px;
+  }
+
+  .transaction-search-wrap .compact-filter-grid {
+    top: 168px;
+  }
+
+  .report-export-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    width: 100%;
+    margin-top: 12px;
+  }
+
+  .report-export-actions .btn {
+    min-width: 0;
+    padding-inline: 8px;
+  }
+}
