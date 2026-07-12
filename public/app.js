@@ -876,6 +876,14 @@ function sellTypeLabel(sellType) {
   return sellType === SELL_TYPE_BORROW ? "庫存借券" : "一般賣出";
 }
 
+function isBorrowSellTransaction(tx = {}) {
+  return tx.transactionType === "SELL" && tx.borrowRebuyType === SELL_TYPE_BORROW;
+}
+
+function isRegularRebuySellTransaction(tx = {}) {
+  return tx.transactionType === "SELL" && !isBorrowSellTransaction(tx);
+}
+
 function resolveSellMatchingFields(data = {}) {
   const requestedType = String(data.sellType || data.borrowRebuyType || "").trim().toUpperCase();
   const sellType = requestedType === SELL_TYPE_BORROW ? SELL_TYPE_BORROW : SELL_TYPE_REGULAR;
@@ -909,7 +917,7 @@ function renderQuickTradeFields(type, entry, defaultSymbol, defaultName, account
     sellFields = `
       <div class="field"><label>賣出方式</label><select name="sellType">
         <option value="${SELL_TYPE_REGULAR}" ${sellType === SELL_TYPE_REGULAR ? "selected" : ""}>一般賣出（扣減庫存）</option>
-        <option value="${SELL_TYPE_BORROW}" ${sellType === SELL_TYPE_BORROW ? "selected" : ""}>自有庫存借券賣出（建立回補）</option>
+        <option value="${SELL_TYPE_BORROW}" ${sellType === SELL_TYPE_BORROW ? "selected" : ""}>自有庫存借券賣出（不列入一般回補清單）</option>
       </select></div>
       <div class="field full" data-sell-normal-match-field ${sellType === SELL_TYPE_BORROW ? "hidden" : ""}>
         <label>配對買進庫存</label>
@@ -918,7 +926,7 @@ function renderQuickTradeFields(type, entry, defaultSymbol, defaultName, account
       </div>
       <div class="field full" data-sell-borrow-match-field ${sellType !== SELL_TYPE_BORROW ? "hidden" : ""}>
         <label>借券來源庫存</label>
-        <small class="field-hint">可多選，依點選順序保留庫存，並建立後續回補任務。</small>
+        <small class="field-hint">可多選，依點選順序保留庫存；後續請用「借券回補」買進，不會列入一般賣出回補清單。</small>
         ${renderMatchLotPicker(borrowSourceOptions, entry.sourceInventoryLotId || "", `<input type="hidden" name="sourceInventoryLotId" data-match-buy value="${escapeAttr(entry.sourceInventoryLotId || "")}" />`, "目前無可借出的持股庫存")}
       </div>
     `;
@@ -2057,7 +2065,6 @@ function renderInventory() {
     <section class="section">
       <div class="section-title">
         <div><h2>目前庫存</h2><p>依帳戶顯示目前持股</p></div>
-        <div class="btn-row inventory-actions"><button class="btn compact-sync-btn" data-action="sync-yahoo-quotes">重抓現價</button></div>
       </div>
       <div class="filters mobile-filter-panel">
 
@@ -2386,14 +2393,14 @@ function renderCashTransfers() {
             <p>從 0050 等效基準延伸到損益、庫存風險、現金流與交易品質，快速檢查策略是否真的改善資產效率。</p>
           </div>
         </div>
-        <div class="filters">
-          <button class="btn blue" data-action="export-pdf-report">匯出 PDF</button>
-          <button class="btn" data-action="email-report-summary">Email 摘要</button>
-          <button class="btn primary" data-action="export-xls">匯出 Excel</button>
-        </div>
       </div>
       <div class="report-period-tabs report-module-tabs" role="tablist" aria-label="報表類型">
         ${reportPresets().map((item) => `<button type="button" class="${item.id === currentReport ? "active" : ""}" data-action="set-report-preset" data-report="${escapeAttr(item.id)}" role="tab" aria-selected="${item.id === currentReport ? "true" : "false"}">${escapeHtml(item.label)}</button>`).join("")}
+      </div>
+      <div class="filters report-export-actions" aria-label="報表匯出動作">
+        <button class="btn blue" data-action="export-pdf-report">匯出 PDF</button>
+        <button class="btn" data-action="email-report-summary">Email 摘要</button>
+        <button class="btn primary" data-action="export-xls">匯出 Excel</button>
       </div>
     </section>
     ${renderSelectedReportSection(currentReport)}
@@ -5222,7 +5229,7 @@ function recomputeLotsMatchesAndRebuy() {
 
   const matches = [];
   const sellTransactions = state.appTransactions
-    .filter((tx) => tx.transactionType === "SELL" && tx.borrowRebuyType !== "BORROW_SELL")
+    .filter(isRegularRebuySellTransaction)
     .sort(sortByDateAsc);
 
   const sellRemainingSharesMap = new Map();
