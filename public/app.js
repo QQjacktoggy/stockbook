@@ -1119,6 +1119,22 @@ function borrowSourceReservations(excludedSellId = "") {
   return reserved;
 }
 
+function borrowAdjustedInventoryLots(lots = state.buyLots) {
+  const reservations = borrowSourceReservations();
+  return lots.map((lot) => {
+    const borrowedShares = Math.min(
+      toNumber(lot.remainingShares),
+      toNumber(reservations.get(lotPrimarySourceId(lot)))
+    );
+    if (borrowedShares <= 0) return lot;
+    return {
+      ...lot,
+      remainingShares: Math.max(0, toNumber(lot.remainingShares) - borrowedShares),
+      borrowedShares
+    };
+  });
+}
+
 function borrowSourceLotOptions(accountId, symbol, selectedValue = "", excludedSellId = "") {
   const selectedIds = normalizeSourceInventoryLotIds(selectedValue);
   const reservations = borrowSourceReservations(excludedSellId);
@@ -1337,7 +1353,7 @@ function renderDashboard() {
 
 function renderPortfolioSnapshot(portfolioId, brokerAccountId = "ALL", context = "dashboard") {
   const accountScoped = brokerAccountId && brokerAccountId !== "ALL";
-  const lots = state.buyLots.filter((lot) =>
+  const lots = borrowAdjustedInventoryLots(state.buyLots).filter((lot) =>
     lot.portfolioId === portfolioId &&
     lot.remainingShares > 0 &&
     (!accountScoped || lot.brokerAccountId === brokerAccountId)
@@ -7756,7 +7772,7 @@ function portfolioMetrics(portfolioId, brokerAccountId = "ALL") {
   const inAccount = (item) => !accountScoped || item.brokerAccountId === brokerAccountId;
   return {
     cash: cashBalance(portfolioId, brokerAccountId || "ALL"),
-    remainingShares: sum(state.buyLots.filter((lot) => lot.portfolioId === portfolioId && inAccount(lot)), "remainingShares"),
+    remainingShares: sum(borrowAdjustedInventoryLots(state.buyLots).filter((lot) => lot.portfolioId === portfolioId && inAccount(lot)), "remainingShares"),
     realizedNetProfit: sum(realizedProfitEvents(portfolioId, accountScoped ? brokerAccountId : "ALL"), "netProfit"),
     openRebuyShares: sum(state.rebuyTasks.filter((task) => task.portfolioId === portfolioId && inAccount(task) && ["OPEN", "PARTIAL_FILLED"].includes(task.status)), "remainingRebuyShares")
   };
@@ -7851,10 +7867,11 @@ function renderBrokerUploadChecklist(rows) {
 }
 
 function accountSummaries(portfolioId) {
+  const adjustedLots = borrowAdjustedInventoryLots(state.buyLots);
   return state.brokerAccounts
     .filter((account) => account.portfolioId === portfolioId)
     .map((account) => {
-      const lots = state.buyLots.filter((lot) => lot.brokerAccountId === account.id);
+      const lots = adjustedLots.filter((lot) => lot.brokerAccountId === account.id);
       const remainingShares = sum(lots, "remainingShares");
       const remainingCost = lots.reduce((total, lot) => total + lot.remainingShares * lot.buyPrice, 0);
       const imports = state.importBatches.filter((batch) => batch.brokerAccountId === account.id);
