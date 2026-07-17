@@ -1297,9 +1297,11 @@ function renderDashboard() {
     ${renderPortfolioSnapshot(portfolioId, brokerAccountId, "dashboard")}
     <section class="metric-grid secondary-metrics">
       ${metricCard("已實現淨利", fmtMoney(metrics.realizedNetProfit), "amber")}
-      ${metricCard("待回補股數", fmtNum(metrics.openRebuyShares), "coral")}
+      ${metricCard("一般待回補", fmtNum(metrics.openRebuyShares), "coral")}
+      ${metricCard("自我借券待回補", fmtNum(metrics.openBorrowRebuyShares), "coral")}
       ${metricCard("待上傳交易日", fmtNum(uploadChecklist.filter((row) => row.status === "MISSING_BROKER_UPLOAD").length), "amber")}
     </section>
+    ${renderBorrowRebuyOverview(portfolioId, brokerAccountId, true)}
     <section class="two-col">
       <div class="section">
         <div class="section-title"><div><h2>資金與損益</h2><p>目前券商帳戶視角</p></div></div>
@@ -1897,11 +1899,13 @@ function renderMatchedBuyLots(matches) {
   `;
 }
 function renderRebuy() {
-  const brokerAccountId = selectedBrokerAccountId();
-  const tasks = state.rebuyTasks.filter((task) => task.portfolioId === selectedPortfolioId() && (!brokerAccountId || task.brokerAccountId === brokerAccountId)).sort(sortBySellDateDesc);
+  const portfolioId = selectedPortfolioId();
+  const brokerAccountId = selectedBrokerAccountId(portfolioId);
+  const tasks = state.rebuyTasks.filter((task) => task.portfolioId === portfolioId && (!brokerAccountId || brokerAccountId === "ALL" || task.brokerAccountId === brokerAccountId)).sort(sortBySellDateDesc);
   const activeTasks = groupRebuyTasksForDisplay(tasks.filter((task) => !rebuyTaskIsArchived(task)));
   const archivedTasks = groupRebuyTasksForDisplay(tasks.filter(rebuyTaskIsArchived));
   return `
+    ${renderBorrowRebuyOverview(portfolioId, brokerAccountId)}
     <section class="section">
       <div class="section-title"><div><h2>回補清單</h2><p>只放還需要處理的回補，完成後會自動移到下方封存</p></div></div>
       ${renderRebuyTaskTable(activeTasks, "目前沒有待回補任務")}
@@ -1912,6 +1916,100 @@ function renderRebuy() {
         <div class="archive-content">${renderRebuyTaskTable(archivedTasks, "尚無封存回補")}</div>
       </details>
     </section>
+  `;
+}
+
+function activeBorrowRebuyCycles(portfolioId, brokerAccountId = "ALL") {
+  const accountScoped = brokerAccountId && brokerAccountId !== "ALL";
+  return (state.borrowRebuyCycles || [])
+    .filter((cycle) => String(cycle.status || "").toLowerCase() !== "closed" && toNumber(cycle.remainingRebuyQty) > 0)
+    .map((cycle) => ({
+      ...cycle,
+      sellTransaction: state.appTransactions.find((tx) => tx.id === cycle.sellTradeId) || null
+    }))
+    .filter((cycle) => cycle.sellTransaction?.portfolioId === portfolioId)
+    .filter((cycle) => !accountScoped || cycle.sellTransaction?.brokerAccountId === brokerAccountId)
+    .sort((a, b) => String(b.sellDate || "").localeCompare(String(a.sellDate || "")) || toNumber(b.sellPrice) - toNumber(a.sellPrice));
+}
+
+function borrowRebuyStatusPill(status) {
+  const normalized = String(status || "").toLowerCase();
+  const labels = { open: "未回補", partial: "部分回補", closed: "已完成" };
+  const tones = { open: "bad", partial: "warn", closed: "ok" };
+  return `<span class="status ${tones[normalized] || "info"}">${escapeHtml(labels[normalized] || status || "-")}</span>`;
+}
+
+function renderBorrowRebuyOverview(portfolioId, brokerAccountId = "ALL", hideWhenEmpty = false) {
+  const cycles = activeBorrowRebuyCycles(portfolioId, brokerAccountId);
+  if (!cycles.length && hideWhenEmpty) return "";
+  const totalShares = cycles.reduce((total, cycle) => total + toNumber(cycle.remainingRebuyQty), 0);
+  return `
+    <section class="section borrow-rebuy-overview">
+      <div class="section-title">
+        <div><h2>自我借券待回補</h2><p>直接查看借券賣出價、目前價位與尚未回補股數</p></div>
+        <span class="status ${cycles.length ? "warn" : "ok"}">${fmtNum(cycles.length)} 筆 / ${fmtNum(totalShares)} 股</span>
+      </div>
+      ${renderTable(
+        [
+          ["security", "股票"],
+          ["remaining", "待回補"],
+          ["sellPrice", "借券賣出價"],
+          ["currentPrice", "目前價位"],
+          ["sellDate", "借券日"],
+          ["account", "券商帳戶"],
+          ["sourceCost", "來源庫存成本"],
+          ["rebought", "已回補"],
+          ["avgRebuyPrice", "平均回補價"],
+          ["status", "狀態"],
+          ["action", "操作"]
+        ],
+        cycles.map((cycle) => {
+          const sell = cycle.sellTransaction;
+          const quote = latestQuoteForSecurity(sell.securityId, sell.portfolioId);
+          const currentPrice = quote ? toNumber(quote.price) : 0;
+          const quoteTone = quote ? (currentPrice <= toNumber(cycle.sellPrice) ? "positive" : "negative") : "muted-text";
+          return {
+            security: escapeHtml(securityLabel(sell.securityId)),
+            remaining: `<strong>${fmtNum(cycle.remainingRebuyQty)} 股</strong>`,
+            sellPrice: fmtPrice(cycle.sellPrice),
+            currentPrice: quote ? `<strong class="${quoteTone}">${fmtPrice(currentPrice)}</strong>` : `<span class="muted-text">尚無現價</span>`,
+            sellDate: escapeHtml(cycle.sellDate || sell.tradeDate || "-"),
+            account: escapeHtml(accountName(sell.brokerAccountId)),
+            sourceCost: escapeHtml(borrowSourceCostLabel(cycle.sourceInventoryLotId)),
+            rebought: `${fmtNum(cycle.totalRebuyQty)} / ${fmtNum(cycle.sellQty)} 股`,
+            avgRebuyPrice: toNumber(cycle.totalRebuyQty) > 0 ? fmtPrice(cycle.avgRebuyPrice) : "-",
+            status: borrowRebuyStatusPill(cycle.status),
+            action: `<button class="btn blue" data-action="quick-borrow-rebuy" data-cycle-id="${escapeAttr(cycle.id)}">回補</button>`,
+            _mobile: renderBorrowRebuyMobileRow(cycle, sell, quote)
+          };
+        }),
+        "目前沒有自我借券待回補任務"
+      )}
+    </section>
+  `;
+}
+
+function renderBorrowRebuyMobileRow(cycle, sell, quote) {
+  const currentPrice = quote ? toNumber(quote.price) : 0;
+  const quoteTone = quote ? (currentPrice <= toNumber(cycle.sellPrice) ? "positive" : "negative") : "muted-text";
+  return `
+    <details class="mobile-transaction-row mobile-table-row rebuy-task-card">
+      <summary>
+        <span><small>股票</small><strong>${escapeHtml(securityLabel(sell.securityId))}</strong></span>
+        <span><small>待回補</small><strong>${fmtNum(cycle.remainingRebuyQty)}股</strong></span>
+        <span><small>借券賣出價</small><strong>${fmtPrice(cycle.sellPrice)}</strong></span>
+        <span><small>目前價位</small><strong class="${quoteTone}">${quote ? fmtPrice(currentPrice) : "-"}</strong></span>
+      </summary>
+      <div class="mobile-transaction-detail rebuy-task-detail">
+        <div><span>借券日</span><strong>${escapeHtml(cycle.sellDate || sell.tradeDate || "-")}</strong></div>
+        <div><span>券商帳戶</span><strong>${escapeHtml(accountName(sell.brokerAccountId))}</strong></div>
+        <div><span>來源庫存成本</span><strong>${escapeHtml(borrowSourceCostLabel(cycle.sourceInventoryLotId))}</strong></div>
+        <div><span>已回補</span><strong>${fmtNum(cycle.totalRebuyQty)} / ${fmtNum(cycle.sellQty)}股</strong></div>
+        <div><span>平均回補價</span><strong>${toNumber(cycle.totalRebuyQty) > 0 ? fmtPrice(cycle.avgRebuyPrice) : "-"}</strong></div>
+        <div><span>狀態</span><strong>${borrowRebuyStatusPill(cycle.status)}</strong></div>
+        <div class="detail-action"><span>操作</span><button class="btn blue" data-action="quick-borrow-rebuy" data-cycle-id="${escapeAttr(cycle.id)}">回補</button></div>
+      </div>
+    </details>
   `;
 }
 
@@ -3053,6 +3151,7 @@ async function onClick(event) {
     if (action === "backup-open-folder") return openGoogleDriveBackupFolder();
     if (action === "backup-disconnect-drive") return await disconnectGoogleDriveBackup();
     if (action === "quick-rebuy-task") return handleRebuyTaskBuy(actionButton.dataset.sellIds);
+    if (action === "quick-borrow-rebuy") return handleBorrowRebuyBuy(actionButton.dataset.cycleId);
     if (action === "manual-close-rebuy-group") return handleManualCloseRebuyGroup(actionButton.dataset.sellIds);
     if (action === "manual-close-rebuy") return handleManualCloseRebuy(actionButton.dataset.sellId);
     if (action === "export-pdf-report") return await exportPdfReport();
@@ -4846,6 +4945,27 @@ function handleRebuyTaskBuy(sellIdsText) {
     buyIntent: "REBUY",
     rebuySellTransactionIds: sellIds.join(","),
     note: `補回提醒 ${security?.symbol || "股票"} ${fmtNum(shares || 100)}股，可輸入低於提醒價的成交價`
+  });
+}
+
+function handleBorrowRebuyBuy(cycleId) {
+  const cycle = activeBorrowRebuyCycles(selectedPortfolioId(), "ALL").find((item) => item.id === cycleId);
+  if (!cycle?.sellTransaction) throw new Error("找不到待回補的自我借券任務");
+  const sell = cycle.sellTransaction;
+  const security = securityById(sell.securityId);
+  const quote = latestQuoteForSecurity(sell.securityId, sell.portfolioId);
+  const shares = toNumber(cycle.remainingRebuyQty);
+  openQuickEntry("BUY", {
+    brokerAccountId: sell.brokerAccountId,
+    symbol: security?.symbol || getPortfolioSettings(sell.portfolioId).defaultSecurity || "0050",
+    securityName: security?.name || security?.symbol || "",
+    price: quote ? toNumber(quote.price) : toNumber(cycle.sellPrice),
+    shares: shares || 100,
+    strategyCategory: "REBUY",
+    buyIntent: "NEW",
+    borrowRebuyType: "REBUY_FILL",
+    rebuyCycleId: cycle.id,
+    note: `回補自我借券 ${security?.symbol || "股票"} ${fmtNum(shares || 100)}股；借券賣出價 ${fmtPrice(cycle.sellPrice)}`
   });
 }
 
@@ -7774,7 +7894,8 @@ function portfolioMetrics(portfolioId, brokerAccountId = "ALL") {
     cash: cashBalance(portfolioId, brokerAccountId || "ALL"),
     remainingShares: sum(borrowAdjustedInventoryLots(state.buyLots).filter((lot) => lot.portfolioId === portfolioId && inAccount(lot)), "remainingShares"),
     realizedNetProfit: sum(realizedProfitEvents(portfolioId, accountScoped ? brokerAccountId : "ALL"), "netProfit"),
-    openRebuyShares: sum(state.rebuyTasks.filter((task) => task.portfolioId === portfolioId && inAccount(task) && ["OPEN", "PARTIAL_FILLED"].includes(task.status)), "remainingRebuyShares")
+    openRebuyShares: sum(state.rebuyTasks.filter((task) => task.portfolioId === portfolioId && inAccount(task) && ["OPEN", "PARTIAL_FILLED"].includes(task.status)), "remainingRebuyShares"),
+    openBorrowRebuyShares: activeBorrowRebuyCycles(portfolioId, brokerAccountId).reduce((total, cycle) => total + toNumber(cycle.remainingRebuyQty), 0)
   };
 }
 function brokerUploadChecklist(portfolioId, brokerAccountId = "ALL") {
