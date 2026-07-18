@@ -1007,7 +1007,14 @@ function renderQuickTradePreviewFromData(data = {}) {
   const accountId = String(data.brokerAccountId || selectedBrokerAccountId(portfolioId));
   const account = state.brokerAccounts.find((item) => item.id === accountId && item.portfolioId === portfolioId);
   const symbol = String(data.symbol || getPortfolioSettings(portfolioId).defaultSecurity || "0050").trim().toUpperCase();
-  const security = state.securities.find((item) => String(item.symbol || "").toUpperCase() === symbol) || null;
+  const storedSecurity = state.securities.find((item) => String(item.symbol || "").toUpperCase() === symbol) || null;
+  const security = storedSecurity || {
+    id: "",
+    symbol,
+    name: String(data.securityName || symbol).trim(),
+    assetType: inferSecurityAssetType(symbol, data.securityName)
+  };
+  const editingTransaction = data.id ? state.appTransactions.find((item) => item.id === data.id) || null : null;
   const price = toNumber(data.price);
   const shares = toNumber(data.shares);
   const gross = price * shares;
@@ -1036,11 +1043,27 @@ function renderQuickTradePreviewFromData(data = {}) {
   const selectedSourceAvailable = sourceOptions
     .filter((option) => selectedSourceIds.some((id) => matchOptionIds(option).includes(id)))
     .reduce((total, option) => total + toNumber(option.shares), 0);
+  const editingCashDelta = editingTransaction?.portfolioId === portfolioId && editingTransaction?.brokerAccountId === accountId
+    ? toNumber(effectiveTransactionAmounts(editingTransaction).netAmount)
+    : 0;
+  const editingInventoryDelta = editingTransaction?.portfolioId === portfolioId &&
+    editingTransaction?.brokerAccountId === accountId &&
+    editingTransaction?.securityId === storedSecurity?.id
+    ? previewInventoryDelta(editingTransaction)
+    : 0;
+  const nextInventoryDelta = previewInventoryDelta({
+    ...data,
+    transactionType: type,
+    shares,
+    manualMatchedShares: editingTransaction?.manualMatchedShares
+  });
   const cashBefore = toNumber(metrics.cash);
   const cashDelta = type === "BUY" ? -(gross + totalCosts) : gross - totalCosts;
-  const cashAfter = cashBefore + cashDelta;
+  const cashAfter = cashBefore - editingCashDelta + cashDelta;
   const sharesBefore = isBorrowSell ? selectedSourceAvailable : inventoryBefore;
-  const sharesAfter = type === "BUY" ? sharesBefore + shares : Math.max(0, sharesBefore - shares);
+  const sharesAfter = isBorrowSell
+    ? Math.max(0, sharesBefore + nextInventoryDelta)
+    : Math.max(0, sharesBefore - editingInventoryDelta + nextInventoryDelta);
   const sharesBeforeLabel = isBorrowSell ? "已選來源可借" : "交易前可用庫存";
   const sharesAfterLabel = isBorrowSell ? "借出後來源餘額" : type === "BUY" ? "交易後持股" : "交易後庫存";
   const priceText = price > 0 ? fmtPrice(price) : "-";
@@ -1055,7 +1078,7 @@ function renderQuickTradePreviewFromData(data = {}) {
         <div><span>預估淨收付</span><strong class="${cashDelta >= 0 ? "positive" : "negative"}">${cashDeltaText}</strong></div>
         <div><span>交易後現金</span><strong>${fmtMoney(cashAfter)}</strong></div>
       </div>
-      <small class="quick-trade-preview-note">${escapeHtml(symbol)} ${shares ? `${fmtNum(shares)} 股 @ ${priceText}` : "請輸入股數與成交價"}${isBorrowSell ? `；選取來源後借出剩餘約 ${fmtNum(Math.max(0, selectedSourceAvailable - shares))} 股` : ""}</small>
+      <small class="quick-trade-preview-note">${escapeHtml(symbol)} ${shares ? `${fmtNum(shares)} 股 @ ${priceText}` : "請輸入股數與成交價"}${isBorrowSell ? `；選取來源後借出剩餘約 ${fmtNum(sharesAfter)} 股` : ""}</small>
     </section>
   `;
 }
@@ -4096,6 +4119,25 @@ function resolveTradeCosts(data = {}, autoCosts = { fee: 0, tax: 0 }) {
     tax: String(data.tax ?? "").trim() === "" ? toNumber(autoCosts.tax) : toNumber(data.tax)
   };
 }
+function previewInventoryDelta(transaction = {}) {
+  const type = normalizeType(transaction.transactionType);
+  const shares = toNumber(transaction.shares);
+  if (type === "BUY") {
+    const isBorrowRebuy = transaction.borrowRebuyType === "REBUY_FILL" || String(transaction.buyType || "").trim() === "BORROW_REBUY";
+    return isBorrowRebuy ? 0 : shares;
+  }
+  if (type !== "SELL") return 0;
+  const isBorrowSell = transaction.borrowRebuyType === SELL_TYPE_BORROW || String(transaction.sellType || "").trim() === SELL_TYPE_BORROW;
+  if (!isBorrowSell) {
+    const manualMatchedShares = toNumber(transaction.manualMatchedShares);
+    return -(manualMatchedShares > 0 ? Math.min(manualMatchedShares, shares) : shares);
+  }
+  if (!transaction.id) return -shares;
+  const filledShares = state.appTransactions
+    .filter((item) => item.transactionType === "BUY" && item.borrowRebuyType === "REBUY_FILL" && item.rebuyCycleId === transaction.id)
+    .reduce((total, item) => total + toNumber(item.shares), 0);
+  return -Math.max(0, shares - filledShares);
+}
 async function handleQuickTrade(type) {
   const portfolioId = selectedPortfolioId();
   const accounts = scopedBrokerAccounts(portfolioId);
@@ -6168,8 +6210,7 @@ function scheduleFirebaseAutoSync() {
   if (!canAutoSyncFirebase()) return;
   firebaseAutoSyncQueued = true;
   window.clearTimeout(firebaseAutoSyncTimer);
-  state.settings.firebase.status = "PENDING";
-  persist();
+  markFirebaseSyncPending();
   if (!firebaseAutoSyncInFlight) firebaseAutoSyncTimer = window.setTimeout(runFirebaseAutoSync, 900);
 }
 
@@ -6201,6 +6242,11 @@ function markFirebaseSyncFailure(error) {
   state.settings.firebase.lastErrorAt = nowIso();
   persist();
   return message;
+}
+function markFirebaseSyncPending() {
+  state.settings.firebase.status = "PENDING";
+  persist();
+  render();
 }
 // Gzip compression and decompression helper functions
 async function compressText(text) {
@@ -6268,12 +6314,8 @@ async function smartFirebaseSync(options = {}) {
   }
   if (remote && ledgerContentScore(remote) > ledgerContentScore(local)) {
     mergeCurrentUserState(remote);
-    state.settings.firebase.lastSyncAt = nowIso();
     state.settings.firebase.lastError = "";
     state.settings.firebase.lastErrorAt = "";
-    state.settings.firebase.status = "SYNCED";
-    persist();
-    render();
     await syncToFirebase({ silent: true });
     if (!options.silent) showToast("已以資料較多的 Firebase 版本更新本機，並回寫同步");
     return;
@@ -6282,6 +6324,7 @@ async function smartFirebaseSync(options = {}) {
 }
 
 async function syncToFirebase(options = {}) {
+  markFirebaseSyncPending();
   const runtime = await getFirebaseRuntime();
   requireFirebaseUser(runtime);
   const namespace = firebaseNamespace();
@@ -6334,6 +6377,7 @@ async function syncToFirebase(options = {}) {
 }
 
 async function loadFromFirebase() {
+  markFirebaseSyncPending();
   const runtime = await getFirebaseRuntime();
   requireFirebaseUser(runtime);
   const namespace = firebaseNamespace();

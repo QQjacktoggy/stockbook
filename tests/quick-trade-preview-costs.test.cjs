@@ -45,11 +45,29 @@ const preview = JSON.parse(vm.runInContext([
   "state.ui.activeBrokerAccountId = 'account-1';",
   "const manual = renderQuickTradePreviewFromData({ transactionType: 'SELL', brokerAccountId: 'account-1', symbol: '0050', price: 100, shares: 1000, fee: '123', tax: '456' });",
   "const automatic = renderQuickTradePreviewFromData({ transactionType: 'SELL', brokerAccountId: 'account-1', symbol: '0050', price: 100, shares: 1000, fee: '', tax: '' });",
-  "JSON.stringify({ manual, automatic })"
+  "const unknownSecurity = renderQuickTradePreviewFromData({ transactionType: 'SELL', brokerAccountId: 'account-1', symbol: '2330', securityName: 'TSMC', price: 100, shares: 1000, fee: '', tax: '' });",
+  "state.appTransactions = [",
+  "  { id: 'deposit-1', userId: 'user-1', portfolioId: 'portfolio-1', brokerId: 'broker-1', brokerAccountId: 'account-1', securityId: 'sec-0050', transactionType: 'DEPOSIT', tradeDate: '2026-07-01', price: 1000000, shares: 0, fee: 0, tax: 0 },",
+  "  { id: 'edit-buy', userId: 'user-1', portfolioId: 'portfolio-1', brokerId: 'broker-1', brokerAccountId: 'account-1', securityId: 'sec-0050', transactionType: 'BUY', tradeDate: '2026-07-02', price: 50, shares: 1000, fee: 0, tax: 0 },",
+  "  { id: 'edit-sell', userId: 'user-1', portfolioId: 'portfolio-1', brokerId: 'broker-1', brokerAccountId: 'account-1', securityId: 'sec-0050', transactionType: 'SELL', tradeDate: '2026-07-03', price: 100, shares: 100, fee: 0, tax: 0, linkedBuyTransactionId: 'edit-buy', manualMatchedShares: 50 }",
+  "];",
+  "recomputeAll();",
+  "const editBuy = renderQuickTradePreviewFromData({ id: 'edit-buy', transactionType: 'BUY', brokerAccountId: 'account-1', symbol: '0050', price: 50, shares: 1000, fee: '0', tax: '0' });",
+  "const editSell = renderQuickTradePreviewFromData({ id: 'edit-sell', transactionType: 'SELL', sellType: 'REGULAR_SELL', brokerAccountId: 'account-1', symbol: '0050', price: 100, shares: 100, fee: '0', tax: '0', linkedBuyTransactionId: 'edit-buy' });",
+  "const editSellShares = renderQuickTradePreviewFromData({ id: 'edit-sell', transactionType: 'SELL', sellType: 'REGULAR_SELL', brokerAccountId: 'account-1', symbol: '0050', price: 100, shares: 80, fee: '0', tax: '0', linkedBuyTransactionId: 'edit-buy' });",
+  "JSON.stringify({ manual, automatic, unknownSecurity, editBuy, editSell, editSellShares })"
 ].join("\n"), context));
 
 assert.match(preview.manual, /99,421/);
 assert.match(preview.manual, /1,099,421/);
 assert.match(preview.automatic, /99,861/);
 assert.match(preview.automatic, /1,099,861/);
+assert.match(preview.unknownSecurity, /99,661/);
+assert.match(preview.unknownSecurity, /1,099,661/);
+assert.match(preview.editBuy, /交易後持股<\/span><strong>950 股<\/strong>/);
+assert.match(preview.editBuy, /交易後現金<\/span><strong>\$960,000<\/strong>/);
+assert.match(preview.editSell, /交易後庫存<\/span><strong>950 股<\/strong>/);
+assert.match(preview.editSell, /交易後現金<\/span><strong>\$960,000<\/strong>/);
+assert.match(preview.editSellShares, /交易後庫存<\/span><strong>950 股<\/strong>/);
+assert.match(preview.editSellShares, /交易後現金<\/span><strong>\$958,000<\/strong>/);
 console.log("quick trade preview costs: PASS");
