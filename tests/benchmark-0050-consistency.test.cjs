@@ -60,7 +60,16 @@ const actual = JSON.parse(vm.runInContext([
   "const lastRow = benchmark.dailyRows.at(-1);",
   "const summary = renderReportSummaryCards(benchmark);",
   "const report = render0050PerformanceReport({ benchmark });",
-  "JSON.stringify({ benchmark, lastRow, summary, report })"
+  "const lookaheadTransactions = transactions.concat({ id: 'future-sell-2330', userId: 'user-1', portfolioId: 'portfolio-1', brokerId: 'broker-1', brokerAccountId: 'account-1', securityId: 'sec-2330', transactionType: 'SELL', tradeDate: '2026-07-10', price: 600, shares: 1, fee: 0, tax: 0, netAmount: 600 });",
+  "state.marketQuotes = [{ id: 'quote-portfolio-1-sec-2330', portfolioId: 'portfolio-1', securityId: 'sec-2330', price: 500, source: 'TEST_CURRENT', sourceDate: '2026-07-10' }];",
+  "state.cashLedger.push({ portfolioId: 'portfolio-1', brokerAccountId: 'account-1', tradeDate: '2026-07-05', amount: 0 });",
+  "const lookaheadBenchmark = build0050BenchmarkModel('portfolio-1', 'account-1', lookaheadTransactions, [], '2026-07-10');",
+  "const historicalRow = lookaheadBenchmark.dailyRows.find((row) => row.fullDate === '2026-07-05');",
+  "state.marketQuotes = [];",
+  "state.cashLedger.push({ portfolioId: 'portfolio-1', brokerAccountId: 'account-1', tradeDate: '2026-07-08', amount: -1000 });",
+  "const transferBenchmark = build0050BenchmarkModel('portfolio-1', 'account-1', transactions, [], '2026-07-03');",
+  "const transferLastRow = transferBenchmark.dailyRows.at(-1);",
+  "JSON.stringify({ benchmark, lastRow, summary, report, historicalRow, transferBenchmark, transferLastRow })"
 ].join("\n"), context));
 
 assert.equal(actual.lastRow.actualShares, 100);
@@ -74,4 +83,9 @@ assert.equal(actual.benchmark.benchmarkRatio, actual.benchmark.operationEquivale
 assert.match(actual.summary, /等值／0050 基準比/);
 assert.match(actual.report, /其他庫存等值股/);
 assert.match(actual.report, /目前等值／0050 基準/);
+assert.equal(actual.historicalRow.otherInventoryValue, 20000, "historical rows must use the latest trade on or before the row date");
+assert.equal(actual.transferLastRow.fullDate, "2026-07-08", "cash-ledger dates must advance the benchmark report date");
+assert.equal(actual.transferLastRow.cash, 69000);
+assert.equal(actual.transferBenchmark.reportPrice, actual.transferLastRow.price);
+assert.equal(actual.transferBenchmark.excessValue, actual.transferLastRow.excess * actual.transferLastRow.price);
 console.log("0050 benchmark consistency: PASS");

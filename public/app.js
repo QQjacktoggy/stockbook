@@ -6698,7 +6698,7 @@ function buildPdfReportModel(portfolioId, brokerAccountId = reportBrokerAccountI
   const matches = state.sellMatches.filter((match) => match.portfolioId === portfolioId && reportAccountMatches(match, brokerAccountId)).slice().sort((a, b) => String(a.sellDate || "").localeCompare(String(b.sellDate || "")));
   const profitEvents = realizedProfitEvents(portfolioId, brokerAccountId);
   if (!transactions.length && !matches.length) throw new Error("沒有可產生報告的交易資料");
-  const reportDate = latestReportDate(transactions, profitEvents);
+  const reportDate = latestBenchmarkReportDate(portfolioId, brokerAccountId, transactions, profitEvents);
   const reportMonth = reportDate.slice(0, 7);
   const reportYear = reportDate.slice(0, 4);
   const dayTransactions = transactions.filter((tx) => tx.tradeDate === reportDate).sort(reportTransactionSort);
@@ -6803,6 +6803,7 @@ function realizedProfitEvents(portfolioId, brokerAccountId = "ALL") {
 function build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inventoryLots, reportDate) {
   const security = benchmarkSecurity(portfolioId);
   const fractionalShareRatio = 0.98;
+  reportDate = latestBenchmarkReportDate(portfolioId, brokerAccountId, transactions, [{ date: reportDate }]);
   const reportPriceInfo = benchmarkPriceForDate(portfolioId, security?.id, reportDate, transactions);
   const reportPrice = toNumber(reportPriceInfo.price);
   const cashFlows = transactions.filter((tx) => ["DEPOSIT", "WITHDRAW"].includes(tx.transactionType)).slice().sort(sortByDateAsc);
@@ -6906,8 +6907,9 @@ function benchmarkSecurity(portfolioId) {
   return state.securities.find((item) => item.symbol === symbol) || state.securities.find((item) => item.symbol === "0050") || ensureSecurity("0050", "元大台灣50");
 }
 
-function benchmarkPriceForDate(portfolioId, securityId, date, transactions = []) {
+function benchmarkPriceForDate(portfolioId, securityId, date, transactions = [], options = {}) {
   if (!securityId) return { price: 0, source: "無基準價" };
+  const asOfOnly = options.asOfOnly === true;
   const cashBenchmark = transactions.filter((tx) => tx.tradeDate === date && tx.benchmarkSecurityId === securityId && toNumber(tx.benchmarkPrice) > 0).sort((a, b) => String(b.benchmarkPriceCapturedAt || b.updatedAt || "").localeCompare(String(a.benchmarkPriceCapturedAt || a.updatedAt || "")))[0];
   if (cashBenchmark) return { price: toNumber(cashBenchmark.benchmarkPrice), source: cashBenchmark.benchmarkPriceSource || "入出金記錄基準價" };
   const sameDayTrades = transactions.filter((tx) => tx.securityId === securityId && tx.tradeDate === date && ["BUY", "SELL"].includes(tx.transactionType) && toNumber(tx.price) > 0);
@@ -6920,7 +6922,12 @@ function benchmarkPriceForDate(portfolioId, securityId, date, transactions = [])
     .map((quote) => ({ ...quote, date: String(quote.sourceDate || quote.quoteTime || "").slice(0, 10) }))
     .filter((quote) => quote.date);
   const priorQuote = datedQuotes.filter((quote) => quote.date <= date).sort((a, b) => b.date.localeCompare(a.date))[0];
-  if (priorQuote) return { price: toNumber(priorQuote.price), source: `${priorQuote.source || "市場報價"} ${priorQuote.date}` };
+  const priorTrade = transactions.filter((tx) => tx.securityId === securityId && tx.tradeDate <= date && ["BUY", "SELL"].includes(tx.transactionType) && toNumber(tx.price) > 0).sort((a, b) => String(b.tradeDate || "").localeCompare(String(a.tradeDate || "")))[0];
+  if (priorQuote && (!priorTrade || priorQuote.date >= priorTrade.tradeDate)) {
+    return { price: toNumber(priorQuote.price), source: `${priorQuote.source || "市場報價"} ${priorQuote.date}` };
+  }
+  if (priorTrade) return { price: toNumber(priorTrade.price), source: "APP最近成交價" };
+  if (asOfOnly) return { price: 0, source: "無當日以前價格" };
   const anyQuote = datedQuotes.sort((a, b) => b.date.localeCompare(a.date))[0];
   if (anyQuote) return { price: toNumber(anyQuote.price), source: `${anyQuote.source || "市場報價"} ${anyQuote.date}` };
   const latestTrade = transactions.filter((tx) => tx.securityId === securityId && ["BUY", "SELL"].includes(tx.transactionType) && toNumber(tx.price) > 0).sort((a, b) => String(b.tradeDate || "").localeCompare(String(a.tradeDate || "")))[0];
@@ -6950,9 +6957,15 @@ function build0050BenchmarkSeries(portfolioId, brokerAccountId, transactions, be
   const cashDates = state.cashLedger
     .filter((row) => row.portfolioId === portfolioId && (!accountScoped || row.brokerAccountId === brokerAccountId))
     .map((row) => row.tradeDate);
-  const dates = Array.from(new Set([...transactions.map((tx) => tx.tradeDate), ...cashDates, reportDate].filter(Boolean))).sort();
+  const quoteDates = (state.marketQuotes || [])
+    .filter((quote) => quote.portfolioId === portfolioId)
+    .map((quote) => String(quote.sourceDate || quote.quoteTime || "").slice(0, 10));
+  const dates = Array.from(new Set([...transactions.map((tx) => tx.tradeDate), ...cashDates, ...quoteDates, reportDate].filter((date) => date && date <= reportDate))).sort();
+  let lastKnownPrice = 0;
   return dates.map((date) => {
-    const price = toNumber(benchmarkPriceForDate(portfolioId, securityId, date, transactions).price || reportPrice);
+    const asOfPrice = toNumber(benchmarkPriceForDate(portfolioId, securityId, date, transactions, { asOfOnly: true }).price);
+    const price = asOfPrice || lastKnownPrice || (date === reportDate ? reportPrice : 0);
+    if (price) lastKnownPrice = price;
     const passive = benchmarkRows.filter((row) => row.date <= date).reduce((total, row) => total + toNumber(row.shares), 0);
     const snapshot = benchmarkOperationSnapshot(portfolioId, brokerAccountId, transactions, securityId, date, price);
     const equivalent = snapshot.actualShares + snapshot.cashEquivalentShares + snapshot.otherEquivalentShares;
@@ -6989,7 +7002,7 @@ function benchmarkOperationSnapshot(portfolioId, brokerAccountId, transactions, 
   let otherInventoryValue = 0;
   for (const [securityId, shares] of sharesBySecurity.entries()) {
     if (securityId === benchmarkSecurityId || !shares) continue;
-    const price = toNumber(benchmarkPriceForDate(portfolioId, securityId, date, transactions).price);
+    const price = toNumber(benchmarkPriceForDate(portfolioId, securityId, date, transactions, { asOfOnly: true }).price);
     otherInventoryValue += shares * price;
   }
   const cashEquivalentShares = benchmarkPrice ? cash / benchmarkPrice : 0;
@@ -7032,6 +7045,18 @@ function latestReportDate(transactions, profitItems = []) {
     ...profitItems.map((item) => item.date || item.sellDate)
   ].filter(Boolean).sort();
   return dates[dates.length - 1] || today();
+}
+
+function latestBenchmarkReportDate(portfolioId, brokerAccountId, transactions, profitItems = []) {
+  const accountScoped = brokerAccountId && brokerAccountId !== "ALL";
+  const cashRows = state.cashLedger.filter((row) =>
+    row.portfolioId === portfolioId && (!accountScoped || row.brokerAccountId === brokerAccountId)
+  );
+  const quoteRows = (state.marketQuotes || [])
+    .filter((quote) => quote.portfolioId === portfolioId)
+    .map((quote) => ({ tradeDate: String(quote.sourceDate || quote.quoteTime || "").slice(0, 10) }))
+    .filter((quote) => quote.tradeDate);
+  return latestReportDate([...transactions, ...cashRows, ...quoteRows], profitItems);
 }
 
 function reportDateRange(transactions) {
@@ -7566,7 +7591,7 @@ function reportRows(type) {
 function benchmarkPerformanceReportRows(portfolioId, brokerAccountId = "ALL") {
   const transactions = scopedTransactions(portfolioId).filter((tx) => reportAccountMatches(tx, brokerAccountId)).slice().sort(sortByDateAsc);
   const matches = state.sellMatches.filter((match) => match.portfolioId === portfolioId && reportAccountMatches(match, brokerAccountId));
-  const reportDate = latestReportDate(transactions, matches);
+  const reportDate = latestBenchmarkReportDate(portfolioId, brokerAccountId, transactions, matches);
   const inventoryLots = state.buyLots.filter((lot) => lot.portfolioId === portfolioId && reportAccountMatches(lot, brokerAccountId) && toNumber(lot.remainingShares) > 0);
   const benchmark = build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inventoryLots, reportDate);
   return {
