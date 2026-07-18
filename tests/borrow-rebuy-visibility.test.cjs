@@ -77,6 +77,8 @@ const actual = JSON.parse(vm.runInContext([
   "const allCycles = activeBorrowRebuyCycles('portfolio-1', 'ALL');",
   "const overview = renderBorrowRebuyOverview('portfolio-1', 'account-1');",
   "const rebuyPage = renderRebuy();",
+  "state.ui.rebuyTab = 'borrow';",
+  "const borrowRebuyPage = renderRebuy();",
   "const metrics = portfolioMetrics('portfolio-1', 'account-1');",
   "render = () => {};",
   "persist = () => {};",
@@ -89,6 +91,7 @@ const actual = JSON.parse(vm.runInContext([
   "  metrics,",
   "  overview,",
   "  rebuyPage,",
+  "  borrowRebuyPage,",
   "  quickEntry: state.ui.quickEntry",
   "})"
 ].join("\n"), context));
@@ -108,7 +111,8 @@ assert.match(actual.overview, /部分回補/);
 assert.match(actual.overview, /data-action="quick-borrow-rebuy"/);
 assert.match(actual.overview, /data-cycle-id="open-borrow-250"/);
 assert.doesNotMatch(actual.overview, /other-account-borrow/);
-assert.match(actual.rebuyPage, /自我借券待回補/);
+assert.match(actual.rebuyPage, /data-rebuy-tab=\"borrow\"/);
+assert.match(actual.borrowRebuyPage, /自我借券待回補/);
 assert.equal(actual.quickEntry.type, "BUY");
 assert.equal(actual.quickEntry.brokerAccountId, "account-1");
 assert.equal(actual.quickEntry.symbol, "0050");

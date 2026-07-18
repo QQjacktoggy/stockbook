@@ -61,3 +61,9 @@
 - rollout plan 已整理到本文件。
 - Firebase 生產帳本快照與正式部署仍需在有登入狀態的 Stockbook 環境中由使用者確認。
 - 本文件預期先以 Draft PR 交付，待驗證與審查後再進入部署階段。
+
+## 本次執行結果（2026-07-18）
+
+- 已在專案 checkout 執行可本地驗證的 P1/P2 項目：快速交易前摘要、借券來源可用股數小計、一般/借券回補 tabs，以及 Firebase `Local only` / `Pending` / `Synced` / `Failed` 狀態與失敗後下載備份提示。
+- 已新增 400 + 100 股多來源借券選取回歸測試，並保留既有借券預約、回補損益、回補可見性、交易分類與一般回補排除測試。
+- Firebase 生產帳本快照、Firebase Hosting 部署與 post-deploy ETag 比對尚未執行；這些步驟需在 PR 審查及正式登入環境中完成。

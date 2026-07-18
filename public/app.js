@@ -117,6 +117,7 @@ window.addEventListener("hashchange", render);
 document.addEventListener("submit", onSubmit);
 document.addEventListener("click", onClick);
 document.addEventListener("change", onChange);
+document.addEventListener("input", onInput);
 document.addEventListener("keydown", onKeydown);
 
 render();
@@ -156,7 +157,7 @@ function initialState() {
     settings: {
       user: { timezone: "Asia/Taipei", baseCurrency: "TWD", dateFormat: "YYYY-MM-DD" },
       portfolios: {},
-      firebase: { configText: "", namespace: "", lastSyncAt: "", status: "LOCAL_ONLY" },
+      firebase: { configText: "", namespace: "", lastSyncAt: "", lastError: "", lastErrorAt: "", status: "LOCAL_ONLY" },
       backup: { provider: "GOOGLE_DRIVE", enabled: false, scheduleTime: "03:00", retentionDays: 90, monthlyRetention: 12 }
     },
     ui: {
@@ -181,6 +182,7 @@ function initialState() {
       quickActionSheetOpen: false,
       accountSheetOpen: false,
       settingsTab: "general",
+      rebuyTab: "regular",
       quickEntry: null
     }
   };
@@ -702,33 +704,75 @@ function formatTimeOnly(isoText) {
 }
 
 function renderTopbarSyncStatus() {
-  if (!canAutoSyncFirebase()) {
-    return `<button class="btn icon-btn sync-status local" type="button" data-action="firebase-push" title="僅本機儲存 (點擊嘗試同步)"><span class="dot"></span>Local</button>`;
-  }
-  const status = state.settings.firebase.status || "LOCAL_ONLY";
-  const lastSyncText = state.settings.firebase.lastSyncAt ? formatTimeOnly(state.settings.firebase.lastSyncAt) : "-";
-  
-  let label = "";
-  let className = "";
-  if (status === "SYNCED") {
-    label = `已同步 ${lastSyncText}`;
-    className = "synced";
-  } else if (status === "PENDING") {
-    label = "同步中...";
-    className = "pending";
-  } else if (status === "SYNC_FAILED") {
-    label = "同步失敗";
-    className = "failed";
-  } else {
-    label = "未同步";
-    className = "local";
-  }
-  
+  const meta = firebaseSyncStatusMeta();
   return `
-    <button class="btn icon-btn sync-status ${className}" type="button" data-action="firebase-push" title="最後同步: ${lastSyncText}，點擊強制同步">
+    <button class="btn icon-btn sync-status ${meta.className}" type="button" data-action="firebase-push" title="${escapeAttr(meta.title)}" aria-label="Firebase Sync: ${escapeAttr(meta.label)}">
       <span class="dot"></span>
-      <span class="sync-label">${label}</span>
+      <span class="sync-label">${escapeHtml(meta.label)}</span>
     </button>
+  `;
+}
+
+function firebaseSyncStatusMeta() {
+  const firebase = state.settings.firebase || {};
+  const lastSyncText = firebase.lastSyncAt ? formatTimeOnly(firebase.lastSyncAt) : "-";
+  const lastError = String(firebase.lastError || "").trim();
+  if (firebase.status === "SYNC_FAILED") {
+    return {
+      status: "SYNC_FAILED",
+      className: "failed",
+      label: "Failed",
+      detail: lastError || "上次 Firebase 同步失敗，請先下載本機備份",
+      title: `Failed：${lastError || "上次同步失敗，請先下載本機備份"}`
+    };
+  }
+  if (!canAutoSyncFirebase()) {
+    return {
+      status: "LOCAL_ONLY",
+      className: "local",
+      label: "Local only",
+      detail: "尚未完成 Firebase 設定或 Google 登入",
+      title: "Local only：先完成 Firebase 設定並使用 Google 登入"
+    };
+  }
+  if (!firebase.status || firebase.status === "LOCAL_ONLY") {
+    return {
+      status: "LOCAL_ONLY",
+      className: "local",
+      label: "Local only",
+      detail: "已具備同步設定，但尚未完成第一次同步",
+      title: "Local only：點擊同步，或先下載本機備份"
+    };
+  }
+  if (firebase.status === "PENDING") {
+    return {
+      status: "PENDING",
+      className: "pending",
+      label: "Pending",
+      detail: "Firebase 同步進行中",
+      title: "Pending：Firebase 同步進行中"
+    };
+  }
+  return {
+    status: "SYNCED",
+    className: "synced",
+    label: lastSyncText === "-" ? "Synced" : `Synced ${lastSyncText}`,
+    detail: lastSyncText === "-" ? "尚未有成功同步時間" : `最後同步 ${lastSyncText}`,
+    title: `Synced：最後同步 ${lastSyncText}，點擊強制同步`
+  };
+}
+
+function renderFirebaseSyncStatusPanel() {
+  const meta = firebaseSyncStatusMeta();
+  const needsBackup = meta.status === "SYNC_FAILED";
+  return `
+    <div class="firebase-sync-status-panel ${meta.className}" role="status" aria-live="polite">
+      <div class="firebase-sync-status-copy">
+        <span class="firebase-sync-status-label"><span class="dot"></span>Firebase Sync：${escapeHtml(meta.label)}</span>
+        <small>${escapeHtml(meta.detail)}</small>
+      </div>
+      ${needsBackup ? `<button class="btn compact" type="button" data-action="download-backup-file">先下載本機備份</button>` : ""}
+    </div>
   `;
 }
 
@@ -860,6 +904,7 @@ function renderQuickEntryModal() {
           <div class="field"><label>券商帳戶</label><select name="brokerAccountId" required>${accounts.map((account) => `<option value="${account.id}" ${account.id === defaultAccountId ? "selected" : ""}>${escapeHtml(accountName(account.id))}</option>`).join("")}</select></div>
           ${isCash ? renderQuickCashFields(type, entry) : renderQuickTradeFields(type, entry, defaultSymbol, defaultName, defaultAccountId)}
         </div>
+        ${isCash ? "" : renderQuickTradePreview(type, entry, defaultSymbol, defaultAccountId)}
         <div class="quick-entry-actions">
           <button class="btn" type="button" data-action="close-quick-entry">取消</button>
           <button class="btn primary" type="submit">${isEdit ? "確認修改" : `儲存${escapeHtml(title)}`}</button>
@@ -945,6 +990,79 @@ function renderQuickTradeFields(type, entry, defaultSymbol, defaultName, account
     <div class="field"><label>分類</label><select name="strategyCategory"><option ${entry.strategyCategory === "TRADING" ? "selected" : ""}>TRADING</option><option ${entry.strategyCategory === "LONG_TERM" ? "selected" : ""}>LONG_TERM</option><option ${entry.strategyCategory === "REBUY" ? "selected" : ""}>REBUY</option><option ${entry.strategyCategory === "CORE" ? "selected" : ""}>CORE</option></select></div>
     <div class="field full"><label>備註</label><input name="note" value="${escapeAttr(entry.note || `快捷${type === "BUY" ? "買進" : "賣出"}`)}" /></div>
   `;
+}
+
+function renderQuickTradePreview(type, entry, defaultSymbol, defaultAccountId) {
+  return renderQuickTradePreviewFromData({
+    ...entry,
+    transactionType: type,
+    symbol: entry.symbol || defaultSymbol,
+    brokerAccountId: entry.brokerAccountId || defaultAccountId
+  });
+}
+
+function renderQuickTradePreviewFromData(data = {}) {
+  const type = normalizeType(data.transactionType);
+  const portfolioId = selectedPortfolioId();
+  const accountId = String(data.brokerAccountId || selectedBrokerAccountId(portfolioId));
+  const account = state.brokerAccounts.find((item) => item.id === accountId && item.portfolioId === portfolioId);
+  const symbol = String(data.symbol || getPortfolioSettings(portfolioId).defaultSecurity || "0050").trim().toUpperCase();
+  const security = state.securities.find((item) => String(item.symbol || "").toUpperCase() === symbol) || null;
+  const price = toNumber(data.price);
+  const shares = toNumber(data.shares);
+  const gross = price * shares;
+  let costs = { fee: 0, tax: 0 };
+  try {
+    if (account && security && price > 0 && shares > 0) costs = estimateTradeCosts(type, price, shares, account.brokerId, security);
+  } catch {
+    costs = { fee: 0, tax: 0 };
+  }
+  const totalCosts = toNumber(costs.fee) + toNumber(costs.tax);
+  const metrics = portfolioMetrics(portfolioId, accountId || "ALL");
+  const allLots = borrowAdjustedInventoryLots(state.buyLots).filter((lot) =>
+    lot.portfolioId === portfolioId &&
+    lot.securityId === security?.id &&
+    lot.remainingShares > 0 &&
+    (!accountId || lot.brokerAccountId === accountId)
+  );
+  const inventoryBefore = sum(allLots, "remainingShares");
+  const isBorrowSell = type === "SELL" && (data.sellType === SELL_TYPE_BORROW || data.borrowRebuyType === SELL_TYPE_BORROW);
+  const sourceOptions = isBorrowSell
+    ? borrowSourceLotOptions(accountId, symbol, data.sourceInventoryLotId || "", data.id || "")
+    : [];
+  const selectedSourceIds = normalizeSourceInventoryLotIds(data.sourceInventoryLotId || "");
+  const selectedSourceAvailable = sourceOptions
+    .filter((option) => selectedSourceIds.some((id) => matchOptionIds(option).includes(id)))
+    .reduce((total, option) => total + toNumber(option.shares), 0);
+  const cashBefore = toNumber(metrics.cash);
+  const cashDelta = type === "BUY" ? -(gross + totalCosts) : gross - totalCosts;
+  const cashAfter = cashBefore + cashDelta;
+  const sharesBefore = isBorrowSell ? selectedSourceAvailable : inventoryBefore;
+  const sharesAfter = type === "BUY" ? sharesBefore + shares : Math.max(0, sharesBefore - shares);
+  const sharesBeforeLabel = isBorrowSell ? "已選來源可借" : "交易前可用庫存";
+  const sharesAfterLabel = isBorrowSell ? "借出後來源餘額" : type === "BUY" ? "交易後持股" : "交易後庫存";
+  const priceText = price > 0 ? fmtPrice(price) : "-";
+  const cashDeltaText = cashDelta === 0 && !price ? "-" : fmtMoney(cashDelta);
+  return `
+    <section class="quick-trade-preview" data-quick-trade-preview aria-label="交易前摘要">
+      <div class="quick-trade-preview-head"><span>交易前摘要</span><small>依目前帳戶資料估算，送出前仍會重新驗證</small></div>
+      <div class="quick-trade-preview-grid">
+        <div><span>現金餘額</span><strong>${fmtMoney(cashBefore)}</strong></div>
+        <div><span>${escapeHtml(sharesBeforeLabel)}</span><strong>${fmtNum(sharesBefore)} 股</strong></div>
+        <div><span>${escapeHtml(sharesAfterLabel)}</span><strong>${fmtNum(sharesAfter)} 股</strong></div>
+        <div><span>預估淨收付</span><strong class="${cashDelta >= 0 ? "positive" : "negative"}">${cashDeltaText}</strong></div>
+        <div><span>交易後現金</span><strong>${fmtMoney(cashAfter)}</strong></div>
+      </div>
+      <small class="quick-trade-preview-note">${escapeHtml(symbol)} ${shares ? `${fmtNum(shares)} 股 @ ${priceText}` : "請輸入股數與成交價"}${isBorrowSell ? `；選取來源後借出剩餘約 ${fmtNum(Math.max(0, selectedSourceAvailable - shares))} 股` : ""}</small>
+    </section>
+  `;
+}
+
+function updateQuickTradePreview(form) {
+  if (!form?.matches('form[data-form="quick-entry"]')) return;
+  const preview = form.querySelector("[data-quick-trade-preview]");
+  if (!preview) return;
+  preview.outerHTML = renderQuickTradePreviewFromData(Object.fromEntries(new FormData(form).entries()));
 }
 
 function renderQuickBuyIntentFields(entry, symbol, accountId) {
@@ -1246,7 +1364,8 @@ function matchPickerSummary(lots, selectedIds) {
   const chain = selectedLots
     .map((lot) => `@${fmtPrice(lot.price)} ${fmtNum(lot.shares)}股`)
     .join(" / ");
-  return `已選 ${selectedLots.length} 項，扣除順序：${chain}`;
+  const selectedShares = selectedLots.reduce((total, lot) => total + toNumber(lot.shares), 0);
+  return `已選 ${selectedLots.length} 項，可用合計 ${fmtNum(selectedShares)} 股；扣除順序：${chain}`;
 }
 function renderRoute(path) {
   const routeMap = {
@@ -1904,18 +2023,31 @@ function renderRebuy() {
   const tasks = state.rebuyTasks.filter((task) => task.portfolioId === portfolioId && (!brokerAccountId || brokerAccountId === "ALL" || task.brokerAccountId === brokerAccountId)).sort(sortBySellDateDesc);
   const activeTasks = groupRebuyTasksForDisplay(tasks.filter((task) => !rebuyTaskIsArchived(task)));
   const archivedTasks = groupRebuyTasksForDisplay(tasks.filter(rebuyTaskIsArchived));
+  const borrowCycles = activeBorrowRebuyCycles(portfolioId, brokerAccountId);
+  const tab = state.ui.rebuyTab === "borrow" ? "borrow" : "regular";
   return `
-    ${renderBorrowRebuyOverview(portfolioId, brokerAccountId)}
-    <section class="section">
-      <div class="section-title"><div><h2>回補清單</h2><p>只放還需要處理的回補，完成後會自動移到下方封存</p></div></div>
-      ${renderRebuyTaskTable(activeTasks, "目前沒有待回補任務")}
+    <section class="section rebuy-tabs-section">
+      <div class="rebuy-tabs" role="tablist" aria-label="回補類型">
+        <button class="rebuy-tab ${tab === "regular" ? "active" : ""}" type="button" role="tab" aria-selected="${tab === "regular" ? "true" : "false"}" data-action="set-rebuy-tab" data-rebuy-tab="regular">
+          <span>一般回補</span><small>${fmtNum(activeTasks.length)} 筆</small>
+        </button>
+        <button class="rebuy-tab ${tab === "borrow" ? "active" : ""}" type="button" role="tab" aria-selected="${tab === "borrow" ? "true" : "false"}" data-action="set-rebuy-tab" data-rebuy-tab="borrow">
+          <span>借券回補</span><small>${fmtNum(borrowCycles.length)} 筆</small>
+        </button>
+      </div>
     </section>
-    <section class="section archive-section">
-      <details class="archive-details">
-        <summary><span>封存回補</span><strong>${fmtNum(archivedTasks.length)} 筆</strong></summary>
-        <div class="archive-content">${renderRebuyTaskTable(archivedTasks, "尚無封存回補")}</div>
-      </details>
-    </section>
+    ${tab === "borrow" ? renderBorrowRebuyOverview(portfolioId, brokerAccountId) : `
+      <section class="section">
+        <div class="section-title"><div><h2>一般回補清單</h2><p>一般賣出配對的回補，完成後會自動移到下方封存</p></div></div>
+        ${renderRebuyTaskTable(activeTasks, "目前沒有待回補任務")}
+      </section>
+      <section class="section archive-section">
+        <details class="archive-details">
+          <summary><span>封存回補</span><strong>${fmtNum(archivedTasks.length)} 筆</strong></summary>
+          <div class="archive-content">${renderRebuyTaskTable(archivedTasks, "尚無封存回補")}</div>
+        </details>
+      </section>
+    `}
   `;
 }
 
@@ -2921,6 +3053,7 @@ function renderSettings() {
     <div class="settings-panel" ${settingsTab !== "data" ? "hidden" : ""}>
     <section class="section">
       <div class="section-title"><div><h2>Firebase Sync</h2><p>貼上 Web config 後可同步目前使用者帳本</p></div></div>
+      ${renderFirebaseSyncStatusPanel()}
       <form class="form-grid" data-form="firebase-save">
         <div class="field"><label>Namespace</label><input name="namespace" value="${escapeAttr(state.settings.firebase.namespace || currentUser()?.email || "")}" /></div>
         <div class="field full"><label>Firebase Web Config JSON</label><textarea name="configText">${escapeHtml(state.settings.firebase.configText || "")}</textarea></div>
@@ -3144,6 +3277,12 @@ async function onClick(event) {
       render();
       return;
     }
+    if (action === "set-rebuy-tab") {
+      state.ui.rebuyTab = actionButton.dataset.rebuyTab === "borrow" ? "borrow" : "regular";
+      persist();
+      render();
+      return;
+    }
     if (action === "clear-firebase-settings") return handleClearFirebaseSettings();
     if (action === "backup-connect-drive") return await connectGoogleDriveBackup();
     if (action === "backup-run-now") return await runGoogleDriveBackupNow();
@@ -3217,6 +3356,10 @@ async function onClick(event) {
     }
   } catch (error) {
     console.error(error);
+    if (["firebase-push", "firebase-pull"].includes(action)) {
+      markFirebaseSyncFailure(error);
+      render();
+    }
     showToast(formatFirebaseError(error));
   }
 }
@@ -3242,6 +3385,11 @@ function handleSelectReportAccount(accountId) {
   render();
 }
 
+function onInput(event) {
+  const form = event.target.closest('form[data-form="quick-entry"]');
+  if (form) updateQuickTradePreview(form);
+}
+
 function onChange(event) {
   if (event.target.name === "sourceType" && event.target.closest('form[data-form="import-file"]')) {
     const form = event.target.closest('form[data-form="import-file"]');
@@ -3264,6 +3412,7 @@ function onChange(event) {
     if (normalField) normalField.hidden = isBorrow;
     if (borrowField) borrowField.hidden = !isBorrow;
     clearMatchPickerField(isBorrow ? normalField : borrowField);
+    updateQuickTradePreview(sheet);
     return;
   }
   if (event.target.name === "buyType") {
@@ -3272,12 +3421,14 @@ function onChange(event) {
     const borrowField = sheet?.querySelector("[data-borrow-rebuy-intent-field]");
     if (rebuyField) rebuyField.hidden = event.target.value !== "REBUY";
     if (borrowField) borrowField.hidden = event.target.value !== "BORROW_REBUY";
+    updateQuickTradePreview(sheet);
     return;
   }
   if (event.target.name === "buyIntent") {
     const sheet = event.target.closest(".quick-entry-sheet");
     const rebuyField = sheet?.querySelector("[data-rebuy-intent-field]");
     if (rebuyField) rebuyField.hidden = event.target.value !== "REBUY";
+    updateQuickTradePreview(sheet);
     return;
   }
   if (["brokerAccountId", "symbol"].includes(event.target.name) && event.target.closest('form[data-form="quick-entry"]')) {
@@ -3687,9 +3838,10 @@ function refreshMatchPicker(picker, ids) {
   if (summary) {
     const selectedLots = orderedMatchLots(lots, ids).filter((lot) => matchOptionSelected(lot, ids));
     summary.textContent = selectedLots.length
-      ? `已選 ${selectedLots.length} 項，扣除順序：${selectedLots.map((lot) => `@${lot.price} ${lot.shares}股`).join(" / ")}`
+      ? `已選 ${selectedLots.length} 項，可用合計 ${fmtNum(selectedLots.reduce((total, lot) => total + toNumber(lot.shares), 0))} 股；扣除順序：${selectedLots.map((lot) => `@${lot.price} ${lot.shares}股`).join(" / ")}`
       : "可選多筆，先點的會先扣；價格在前，股數在後。";
   }
+  updateQuickTradePreview(picker.closest('form[data-form="quick-entry"]'));
 }
 
 async function handleQuickEntrySubmit(data) {
@@ -4556,6 +4708,9 @@ function handleSettingsSave(data) {
 function handleFirebaseSave(data) {
   state.settings.firebase.configText = String(data.configText || "").trim();
   state.settings.firebase.namespace = String(data.namespace || "").trim();
+  state.settings.firebase.status = "LOCAL_ONLY";
+  state.settings.firebase.lastError = "";
+  state.settings.firebase.lastErrorAt = "";
   firebaseRuntime = null;
   persist();
   showToast("Firebase 設定已儲存");
@@ -6021,10 +6176,9 @@ async function runFirebaseAutoSync() {
     await smartFirebaseSync({ silent: true });
   } catch (error) {
     console.error(error);
-    state.settings.firebase.status = "SYNC_FAILED";
-    persist();
+    const message = markFirebaseSyncFailure(error);
     render();
-    showToast(`Firebase 自動同步失敗：${formatFirebaseError(error)}`);
+    showToast(`Firebase 自動同步失敗：${message}`);
   } finally {
     firebaseAutoSyncInFlight = false;
     if (firebaseAutoSyncQueued && canAutoSyncFirebase()) {
@@ -6032,6 +6186,15 @@ async function runFirebaseAutoSync() {
       firebaseAutoSyncTimer = window.setTimeout(runFirebaseAutoSync, 250);
     }
   }
+}
+
+function markFirebaseSyncFailure(error) {
+  const message = formatFirebaseError(error);
+  state.settings.firebase.status = "SYNC_FAILED";
+  state.settings.firebase.lastError = message;
+  state.settings.firebase.lastErrorAt = nowIso();
+  persist();
+  return message;
 }
 // Gzip compression and decompression helper functions
 async function compressText(text) {
@@ -6100,6 +6263,8 @@ async function smartFirebaseSync(options = {}) {
   if (remote && ledgerContentScore(remote) > ledgerContentScore(local)) {
     mergeCurrentUserState(remote);
     state.settings.firebase.lastSyncAt = nowIso();
+    state.settings.firebase.lastError = "";
+    state.settings.firebase.lastErrorAt = "";
     state.settings.firebase.status = "SYNCED";
     persist();
     render();
@@ -6154,6 +6319,8 @@ async function syncToFirebase(options = {}) {
   await batch.commit();
 
   state.settings.firebase.lastSyncAt = nowIso();
+  state.settings.firebase.lastError = "";
+  state.settings.firebase.lastErrorAt = "";
   state.settings.firebase.status = "SYNCED";
   persist();
   render();
@@ -6169,6 +6336,8 @@ async function loadFromFirebase() {
 
   mergeCurrentUserState(remote);
   state.settings.firebase.lastSyncAt = nowIso();
+  state.settings.firebase.lastError = "";
+  state.settings.firebase.lastErrorAt = "";
   state.settings.firebase.status = "SYNCED";
   commit("已從 Firebase 載入");
 }
