@@ -1013,7 +1013,9 @@ function renderQuickTradePreviewFromData(data = {}) {
   const gross = price * shares;
   let costs = { fee: 0, tax: 0 };
   try {
-    if (account && security && price > 0 && shares > 0) costs = estimateTradeCosts(type, price, shares, account.brokerId, security);
+    if (account && security && price > 0 && shares > 0) {
+      costs = resolveTradeCosts(data, estimateTradeCosts(type, price, shares, account.brokerId, security));
+    }
   } catch {
     costs = { fee: 0, tax: 0 };
   }
@@ -3885,8 +3887,7 @@ async function handleQuickEntrySubmit(data) {
     } else {
       const securityForCosts = ensureSecurity(data.symbol, data.securityName);
       const autoCosts = estimateTradeCosts(type, data.price, data.shares, account.brokerId, securityForCosts);
-      const fee = String(data.fee ?? "").trim() === "" ? autoCosts.fee : toNumber(data.fee);
-      const tax = String(data.tax ?? "").trim() === "" ? autoCosts.tax : toNumber(data.tax);
+      const { fee, tax } = resolveTradeCosts(data, autoCosts);
       
       let borrowRebuyType = "";
       let sourceInventoryLotId = "";
@@ -3983,8 +3984,7 @@ async function handleQuickEntrySubmit(data) {
   }
   const securityForCosts = ensureSecurity(data.symbol, data.securityName);
   const autoCosts = estimateTradeCosts(type, data.price, data.shares, account.brokerId, securityForCosts);
-  const fee = String(data.fee ?? "").trim() === "" ? autoCosts.fee : toNumber(data.fee);
-  const tax = String(data.tax ?? "").trim() === "" ? autoCosts.tax : toNumber(data.tax);
+  const { fee, tax } = resolveTradeCosts(data, autoCosts);
   
   let borrowRebuyType = "";
   let sourceInventoryLotId = "";
@@ -4089,6 +4089,12 @@ function estimateTradeCosts(type, price, shares, brokerId, security = null) {
   const taxRate = security ? securityTaxRate(security, feeSetting) : toNumber(feeSetting.stockSellTaxRate ?? feeSetting.sellTaxRate ?? 0.003);
   const tax = type === "SELL" ? Math.floor(gross * taxRate) : 0;
   return { fee, tax };
+}
+function resolveTradeCosts(data = {}, autoCosts = { fee: 0, tax: 0 }) {
+  return {
+    fee: String(data.fee ?? "").trim() === "" ? toNumber(autoCosts.fee) : toNumber(data.fee),
+    tax: String(data.tax ?? "").trim() === "" ? toNumber(autoCosts.tax) : toNumber(data.tax)
+  };
 }
 async function handleQuickTrade(type) {
   const portfolioId = selectedPortfolioId();
