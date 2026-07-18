@@ -2697,8 +2697,8 @@ function reportPresetKey() {
 
 function renderSelectedReportSection(reportType = reportPresetKey()) {
   try {
-    if (reportType === "benchmark0050") return `${renderReportSummaryCards()}${render0050PerformanceReport()}`;
     const model = buildPdfReportModel(selectedPortfolioId(), reportBrokerAccountId());
+    if (reportType === "benchmark0050") return `${renderReportSummaryCards(model.benchmark)}${render0050PerformanceReport(model)}`;
     if (reportType === "pnl") return renderPnlReport(model);
     if (reportType === "inventoryRisk") return renderInventoryRiskReport(model);
     if (reportType === "cashflow") return renderCashflowReport(model);
@@ -2709,25 +2709,20 @@ function renderSelectedReportSection(reportType = reportPresetKey()) {
   }
 }
 
-function renderReportSummaryCards() {
-  const portfolioId = selectedPortfolioId();
-  const accountId = reportBrokerAccountId(portfolioId);
-  const transactions = scopedTransactions(portfolioId).filter((tx) => reportAccountMatches(tx, accountId)).slice().sort(sortByDateAsc);
-  const inventoryLots = state.buyLots.filter((lot) => lot.portfolioId === portfolioId && reportAccountMatches(lot, accountId) && toNumber(lot.remainingShares) > 0);
-  const reportDate = latestReportDate(transactions, state.sellMatches.filter((match) => match.portfolioId === portfolioId && reportAccountMatches(match, accountId)));
-  const benchmark = build0050BenchmarkModel(portfolioId, accountId, transactions, inventoryLots, reportDate);
+function renderReportSummaryCards(benchmark) {
+  const ratio = benchmark?.benchmarkRatio;
   return `
     <section class="metric-grid report-summary-grid">
       ${metricCard("操作等值股數", benchmark.reportPrice ? fmtNum(benchmark.operationEquivalentShares, 2) : "-", benchmark.excessShares >= 0 ? "teal" : "coral")}
       ${metricCard("不操作基準股數", benchmark.reportPrice ? fmtNum(benchmark.passiveShares, 2) : "-", "blue")}
+      ${metricCard("等值／0050 基準比", ratio === null || ratio === undefined ? "-" : `${fmtNum(ratio, 2)}×`, ratio >= 1 ? "teal" : "coral")}
       ${metricCard("超額股數", benchmark.reportPrice ? fmtNum(benchmark.excessShares, 2) : "-", benchmark.excessShares >= 0 ? "teal" : "coral")}
       ${metricCard("超額等值", benchmark.reportPrice ? fmtMoney(benchmark.excessValue) : "-", benchmark.excessValue >= 0 ? "teal" : "coral")}
     </section>
   `;
 }
-function render0050PerformanceReport() {
+function render0050PerformanceReport(model) {
   try {
-    const model = buildPdfReportModel(selectedPortfolioId(), reportBrokerAccountId());
     const benchmark = model.benchmark;
     if (!benchmark?.reportPrice) return `<section class="section"><div class="empty">需要 0050 收盤價或成交價後，才能換算每日等值股數。</div></section>`;
     const rows = benchmark.dailyRows.length ? benchmark.dailyRows : benchmark.series;
@@ -2744,17 +2739,19 @@ function render0050PerformanceReport() {
             <div class="summary-line"><span>價格來源</span><strong>${escapeHtml(benchmark.reportPriceSource)}</strong></div>
             <div class="summary-line"><span>入金換算</span><strong>次一交易日收盤價 × ${fmtNum(benchmark.fractionalShareRatio, 2)}</strong></div>
             <div class="summary-line"><span>現金也換股</span><strong>${fmtNum(benchmark.cashEquivalentShares, 2)} 股</strong></div>
+            <div class="summary-line"><span>目前等值／0050 基準</span><strong>${benchmark.benchmarkRatio === null ? "-" : `${fmtNum(benchmark.benchmarkRatio, 2)}×`}</strong></div>
           </div>
         </div>
       </section>
       <section class="section">
-        <div class="section-title"><div><h2>主要績效列表</h2><p>每日用剩餘 0050 股數與現金換算成等值股數，和不操作買賣的基準比較。</p></div></div>
+        <div class="section-title"><div><h2>主要績效列表</h2><p>每日把 0050、現金與其他庫存折算成等值 0050 股數，和不操作買賣的基準比較。</p></div></div>
         ${renderTable([
           ["date", "日期"],
           ["price", "0050價"],
           ["actual", "剩餘0050"],
           ["cash", "現金"],
           ["cashShares", "現金等值股"],
+          ["otherShares", "其他庫存等值股"],
           ["equivalent", "操作等值股"],
           ["passive", "不操作基準"],
           ["excess", "超額股數"],
@@ -2765,6 +2762,7 @@ function render0050PerformanceReport() {
           actual: fmtNum(row.actualShares || 0, 2),
           cash: fmtMoney(row.cash || 0),
           cashShares: fmtNum(row.cashEquivalentShares || 0, 2),
+          otherShares: fmtNum(row.otherEquivalentShares || 0, 2),
           equivalent: fmtNum(row.equivalent || 0, 2),
           passive: fmtNum(row.passive || 0, 2),
           excess: `<span class="${toNumber(row.excess) >= 0 ? "positive" : "negative"}">${fmtNum(row.excess || 0, 2)}</span>`,
@@ -2782,7 +2780,7 @@ function renderReportOverview(model) {
   const cashflow = buildCashflowMetrics(model);
   const insights = buildReportInsights(model, quality, inventory, cashflow);
   return `
-    ${renderReportSummaryCards()}
+    ${renderReportSummaryCards(model.benchmark)}
     <section class="metric-grid report-summary-grid">
       ${metricCard("總資產估值", fmtMoney(cashflow.totalAssets), "teal")}
       ${metricCard("本月已實現", fmtMoney(model.monthSummary.net), model.monthSummary.net >= 0 ? "teal" : "coral")}
@@ -3035,7 +3033,11 @@ function handleSetReportPreset(reportType) {
   render();
 }
 function renderReportChartPreview() {
-  return render0050PerformanceReport();
+  try {
+    return render0050PerformanceReport(buildPdfReportModel(selectedPortfolioId(), reportBrokerAccountId()));
+  } catch (error) {
+    return `<section class="section"><div class="empty">目前沒有足夠資料產生 0050 績效追蹤：${escapeHtml(error.message || error)}</div></section>`;
+  }
 }
 function renderSettings() {
   const settings = getPortfolioSettings();
@@ -6696,7 +6698,7 @@ function buildPdfReportModel(portfolioId, brokerAccountId = reportBrokerAccountI
   const matches = state.sellMatches.filter((match) => match.portfolioId === portfolioId && reportAccountMatches(match, brokerAccountId)).slice().sort((a, b) => String(a.sellDate || "").localeCompare(String(b.sellDate || "")));
   const profitEvents = realizedProfitEvents(portfolioId, brokerAccountId);
   if (!transactions.length && !matches.length) throw new Error("沒有可產生報告的交易資料");
-  const reportDate = latestReportDate(transactions, profitEvents);
+  const reportDate = latestBenchmarkReportDate(portfolioId, brokerAccountId, transactions, profitEvents);
   const reportMonth = reportDate.slice(0, 7);
   const reportYear = reportDate.slice(0, 4);
   const dayTransactions = transactions.filter((tx) => tx.tradeDate === reportDate).sort(reportTransactionSort);
@@ -6801,6 +6803,7 @@ function realizedProfitEvents(portfolioId, brokerAccountId = "ALL") {
 function build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inventoryLots, reportDate) {
   const security = benchmarkSecurity(portfolioId);
   const fractionalShareRatio = 0.98;
+  reportDate = latestBenchmarkReportDate(portfolioId, brokerAccountId, transactions, [{ date: reportDate }]);
   const reportPriceInfo = benchmarkPriceForDate(portfolioId, security?.id, reportDate, transactions);
   const reportPrice = toNumber(reportPriceInfo.price);
   const cashFlows = transactions.filter((tx) => ["DEPOSIT", "WITHDRAW"].includes(tx.transactionType)).slice().sort(sortByDateAsc);
@@ -6835,17 +6838,26 @@ function build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inv
       note: isDeposit ? "次一交易日收盤價 × 0.98 換算" : "出金日賣出等值"
     });
   }
-  const benchmarkLots = inventoryLots.filter((lot) => lot.securityId === security?.id);
-  const actualShares = reportSum(benchmarkLots, (lot) => lot.remainingShares);
-  const otherInventoryValue = reportSum(inventoryLots.filter((lot) => lot.securityId !== security?.id), (lot) => inventoryLotReportMarketValue(lot, reportPrice));
-  const cash = portfolioMetrics(portfolioId, brokerAccountId).cash;
-  const cashEquivalentShares = reportPrice ? cash / reportPrice : 0;
-  const otherEquivalentShares = reportPrice ? otherInventoryValue / reportPrice : 0;
-  const operationEquivalentShares = actualShares + cashEquivalentShares + otherEquivalentShares;
+  const dailyRows = build0050BenchmarkSeries(portfolioId, brokerAccountId, transactions, rows, reportDate, reportPrice, security?.id);
+  const current = dailyRows[dailyRows.length - 1] || {
+    actualShares: 0,
+    cash: 0,
+    cashEquivalentShares: 0,
+    otherInventoryValue: 0,
+    otherEquivalentShares: 0,
+    equivalent: 0
+  };
+  const actualShares = current.actualShares;
+  const otherInventoryValue = current.otherInventoryValue;
+  const cash = current.cash;
+  const cashEquivalentShares = current.cashEquivalentShares;
+  const otherEquivalentShares = current.otherEquivalentShares;
+  const operationEquivalentShares = current.equivalent;
   const liquidationValue = cash + reportSum(inventoryLots, (lot) => inventoryLotReportLiquidationValue(lot, reportPrice));
   const liquidationEquivalentShares = reportPrice ? liquidationValue / reportPrice : 0;
   const excessShares = operationEquivalentShares - passiveShares;
   const excessRate = passiveShares ? excessShares / passiveShares : 0;
+  const benchmarkRatio = passiveShares ? operationEquivalentShares / passiveShares : null;
   const excessValue = excessShares * reportPrice;
   const equivalentAverageCost = operationEquivalentShares ? (cumulativeDeposit - cumulativeWithdraw) / operationEquivalentShares : 0;
   return {
@@ -6866,12 +6878,13 @@ function build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inv
     liquidationEquivalentShares,
     excessShares,
     excessRate,
+    benchmarkRatio,
     excessValue,
     equivalentAverageCost,
     fractionalShareRatio,
     rows,
-    series: build0050BenchmarkSeries(portfolioId, transactions, rows, reportDate, reportPrice, security?.id),
-    dailyRows: build0050BenchmarkSeries(portfolioId, transactions, rows, reportDate, reportPrice, security?.id),
+    series: dailyRows,
+    dailyRows,
     dividendPolicy: "股息現金保留",
     priceRule: "入金以次一交易日收盤價換算 0050 股數，並以 0.98 反映零股成交價差；若缺價則採最近可用市場報價或報告日現價。"
   };
@@ -6894,8 +6907,9 @@ function benchmarkSecurity(portfolioId) {
   return state.securities.find((item) => item.symbol === symbol) || state.securities.find((item) => item.symbol === "0050") || ensureSecurity("0050", "元大台灣50");
 }
 
-function benchmarkPriceForDate(portfolioId, securityId, date, transactions = []) {
+function benchmarkPriceForDate(portfolioId, securityId, date, transactions = [], options = {}) {
   if (!securityId) return { price: 0, source: "無基準價" };
+  const asOfOnly = options.asOfOnly === true;
   const cashBenchmark = transactions.filter((tx) => tx.tradeDate === date && tx.benchmarkSecurityId === securityId && toNumber(tx.benchmarkPrice) > 0).sort((a, b) => String(b.benchmarkPriceCapturedAt || b.updatedAt || "").localeCompare(String(a.benchmarkPriceCapturedAt || a.updatedAt || "")))[0];
   if (cashBenchmark) return { price: toNumber(cashBenchmark.benchmarkPrice), source: cashBenchmark.benchmarkPriceSource || "入出金記錄基準價" };
   const sameDayTrades = transactions.filter((tx) => tx.securityId === securityId && tx.tradeDate === date && ["BUY", "SELL"].includes(tx.transactionType) && toNumber(tx.price) > 0);
@@ -6908,7 +6922,12 @@ function benchmarkPriceForDate(portfolioId, securityId, date, transactions = [])
     .map((quote) => ({ ...quote, date: String(quote.sourceDate || quote.quoteTime || "").slice(0, 10) }))
     .filter((quote) => quote.date);
   const priorQuote = datedQuotes.filter((quote) => quote.date <= date).sort((a, b) => b.date.localeCompare(a.date))[0];
-  if (priorQuote) return { price: toNumber(priorQuote.price), source: `${priorQuote.source || "市場報價"} ${priorQuote.date}` };
+  const priorTrade = transactions.filter((tx) => tx.securityId === securityId && tx.tradeDate <= date && ["BUY", "SELL"].includes(tx.transactionType) && toNumber(tx.price) > 0).sort((a, b) => String(b.tradeDate || "").localeCompare(String(a.tradeDate || "")))[0];
+  if (priorQuote && (!priorTrade || priorQuote.date >= priorTrade.tradeDate)) {
+    return { price: toNumber(priorQuote.price), source: `${priorQuote.source || "市場報價"} ${priorQuote.date}` };
+  }
+  if (priorTrade) return { price: toNumber(priorTrade.price), source: "APP最近成交價" };
+  if (asOfOnly) return { price: 0, source: "無當日以前價格" };
   const anyQuote = datedQuotes.sort((a, b) => b.date.localeCompare(a.date))[0];
   if (anyQuote) return { price: toNumber(anyQuote.price), source: `${anyQuote.source || "市場報價"} ${anyQuote.date}` };
   const latestTrade = transactions.filter((tx) => tx.securityId === securityId && ["BUY", "SELL"].includes(tx.transactionType) && toNumber(tx.price) > 0).sort((a, b) => String(b.tradeDate || "").localeCompare(String(a.tradeDate || "")))[0];
@@ -6933,35 +6952,62 @@ function inventoryLotReportLiquidationValue(lot, fallbackPrice) {
   return Math.max(0, gross - feeAmount - taxAmount);
 }
 
-function build0050BenchmarkSeries(portfolioId, transactions, benchmarkRows, reportDate, reportPrice, securityId) {
-  const dates = Array.from(new Set([...transactions.map((tx) => tx.tradeDate), reportDate].filter(Boolean))).sort();
+function build0050BenchmarkSeries(portfolioId, brokerAccountId, transactions, benchmarkRows, reportDate, reportPrice, securityId) {
+  const accountScoped = brokerAccountId && brokerAccountId !== "ALL";
+  const cashDates = state.cashLedger
+    .filter((row) => row.portfolioId === portfolioId && (!accountScoped || row.brokerAccountId === brokerAccountId))
+    .map((row) => row.tradeDate);
+  const quoteDates = (state.marketQuotes || [])
+    .filter((quote) => quote.portfolioId === portfolioId)
+    .map((quote) => String(quote.sourceDate || quote.quoteTime || "").slice(0, 10));
+  const dates = Array.from(new Set([...transactions.map((tx) => tx.tradeDate), ...cashDates, ...quoteDates, reportDate].filter((date) => date && date <= reportDate))).sort();
+  let lastKnownPrice = 0;
   return dates.map((date) => {
-    const price = toNumber(benchmarkPriceForDate(portfolioId, securityId, date, transactions).price || reportPrice);
+    const asOfPrice = toNumber(benchmarkPriceForDate(portfolioId, securityId, date, transactions, { asOfOnly: true }).price);
+    const price = asOfPrice || lastKnownPrice || (date === reportDate ? reportPrice : 0);
+    if (price) lastKnownPrice = price;
     const passive = benchmarkRows.filter((row) => row.date <= date).reduce((total, row) => total + toNumber(row.shares), 0);
-    let cash = 0;
-    let shares = 0;
-    for (const tx of transactions.filter((item) => item.tradeDate <= date)) {
-      const amounts = effectiveTransactionAmounts(tx);
-      cash += toNumber(amounts.netAmount);
-      if (tx.securityId === securityId && tx.transactionType === "BUY") shares += toNumber(tx.shares);
-      if (tx.securityId === securityId && tx.transactionType === "SELL") shares -= toNumber(tx.shares);
-    }
-    const cashEquivalentShares = price ? cash / price : 0;
-    const equivalent = shares + cashEquivalentShares;
+    const snapshot = benchmarkOperationSnapshot(portfolioId, brokerAccountId, transactions, securityId, date, price);
+    const equivalent = snapshot.actualShares + snapshot.cashEquivalentShares + snapshot.otherEquivalentShares;
     const excess = equivalent - passive;
     return {
       date: date.slice(5),
       fullDate: date,
       price,
-      actualShares: shares,
-      cash,
-      cashEquivalentShares,
+      actualShares: snapshot.actualShares,
+      cash: snapshot.cash,
+      cashEquivalentShares: snapshot.cashEquivalentShares,
+      otherInventoryValue: snapshot.otherInventoryValue,
+      otherEquivalentShares: snapshot.otherEquivalentShares,
       passive,
       equivalent,
       excess,
       excessValue: excess * price
     };
   });
+}
+
+function benchmarkOperationSnapshot(portfolioId, brokerAccountId, transactions, benchmarkSecurityId, date, benchmarkPrice) {
+  const accountScoped = brokerAccountId && brokerAccountId !== "ALL";
+  const sharesBySecurity = new Map();
+  for (const tx of transactions.filter((item) => item.tradeDate <= date && ["BUY", "SELL"].includes(item.transactionType))) {
+    const direction = tx.transactionType === "BUY" ? 1 : -1;
+    sharesBySecurity.set(tx.securityId, (sharesBySecurity.get(tx.securityId) || 0) + direction * toNumber(tx.shares));
+  }
+  const cash = reportSum(
+    state.cashLedger.filter((row) => row.portfolioId === portfolioId && (!accountScoped || row.brokerAccountId === brokerAccountId) && row.tradeDate <= date),
+    (row) => row.amount
+  );
+  const actualShares = toNumber(sharesBySecurity.get(benchmarkSecurityId));
+  let otherInventoryValue = 0;
+  for (const [securityId, shares] of sharesBySecurity.entries()) {
+    if (securityId === benchmarkSecurityId || !shares) continue;
+    const price = toNumber(benchmarkPriceForDate(portfolioId, securityId, date, transactions, { asOfOnly: true }).price);
+    otherInventoryValue += shares * price;
+  }
+  const cashEquivalentShares = benchmarkPrice ? cash / benchmarkPrice : 0;
+  const otherEquivalentShares = benchmarkPrice ? otherInventoryValue / benchmarkPrice : 0;
+  return { actualShares, cash, cashEquivalentShares, otherInventoryValue, otherEquivalentShares };
 }
 function reportAssetSeries(portfolioId, transactions, brokerAccountId = "ALL") {
   const txs = transactions.filter((tx) => tx.portfolioId === portfolioId).slice().sort(sortByDateAsc);
@@ -6999,6 +7045,18 @@ function latestReportDate(transactions, profitItems = []) {
     ...profitItems.map((item) => item.date || item.sellDate)
   ].filter(Boolean).sort();
   return dates[dates.length - 1] || today();
+}
+
+function latestBenchmarkReportDate(portfolioId, brokerAccountId, transactions, profitItems = []) {
+  const accountScoped = brokerAccountId && brokerAccountId !== "ALL";
+  const cashRows = state.cashLedger.filter((row) =>
+    row.portfolioId === portfolioId && (!accountScoped || row.brokerAccountId === brokerAccountId)
+  );
+  const quoteRows = (state.marketQuotes || [])
+    .filter((quote) => quote.portfolioId === portfolioId)
+    .map((quote) => ({ tradeDate: String(quote.sourceDate || quote.quoteTime || "").slice(0, 10) }))
+    .filter((quote) => quote.tradeDate);
+  return latestReportDate([...transactions, ...cashRows, ...quoteRows], profitItems);
 }
 
 function reportDateRange(transactions) {
@@ -7202,6 +7260,7 @@ function pdfBenchmarkOverview(benchmark) {
     <div class="benchmark-grid">
       ${pdfBenchmarkMetric("被動持有基準", `${fmtNum(benchmark.passiveShares, 2)} 股`, "入金日直接買進 0050")}
       ${pdfBenchmarkMetric("操作後等效", `${fmtNum(benchmark.operationEquivalentShares, 2)} 股`, `實際 ${fmtNum(benchmark.actualShares)} 股 + 現金折算`)}
+      ${pdfBenchmarkMetric("等值／0050 基準比", benchmark.benchmarkRatio === null ? "-" : `${fmtNum(benchmark.benchmarkRatio, 2)}×`, "1.00× 代表與直接買進相同")}
       ${pdfBenchmarkMetric("策略超額", pdfSignedShares(benchmark.excessShares), `${stripTags(pdfSignedPercent(benchmark.excessRate))} / ${stripTags(pdfSignedMoney(benchmark.excessValue))}`)}
       ${pdfBenchmarkMetric("等效平均成本", fmtMoney(benchmark.equivalentAverageCost), `報告日基準價 ${fmtPrice(benchmark.reportPrice)}`)}
     </div>
@@ -7532,7 +7591,7 @@ function reportRows(type) {
 function benchmarkPerformanceReportRows(portfolioId, brokerAccountId = "ALL") {
   const transactions = scopedTransactions(portfolioId).filter((tx) => reportAccountMatches(tx, brokerAccountId)).slice().sort(sortByDateAsc);
   const matches = state.sellMatches.filter((match) => match.portfolioId === portfolioId && reportAccountMatches(match, brokerAccountId));
-  const reportDate = latestReportDate(transactions, matches);
+  const reportDate = latestBenchmarkReportDate(portfolioId, brokerAccountId, transactions, matches);
   const inventoryLots = state.buyLots.filter((lot) => lot.portfolioId === portfolioId && reportAccountMatches(lot, brokerAccountId) && toNumber(lot.remainingShares) > 0);
   const benchmark = build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inventoryLots, reportDate);
   return {
