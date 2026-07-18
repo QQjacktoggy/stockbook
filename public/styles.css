@@ -4450,6 +4450,182 @@ td {
     box-shadow: 0 0 0 0 rgba(245, 158, 11, 0);
   }
 }
+
+.firebase-sync-status-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--glass-line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.firebase-sync-status-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.firebase-sync-status-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+  font-weight: 950;
+}
+
+.firebase-sync-status-label .dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #94a3b8;
+}
+
+.firebase-sync-status-panel small {
+  color: var(--muted);
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.firebase-sync-status-panel.synced {
+  background: rgba(209, 250, 229, 0.42);
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.firebase-sync-status-panel.synced .dot {
+  background: #10b981;
+}
+
+.firebase-sync-status-panel.pending {
+  background: rgba(254, 243, 199, 0.46);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+.firebase-sync-status-panel.pending .dot {
+  background: #f59e0b;
+  animation: pulse-orange 1.2s infinite;
+}
+
+.firebase-sync-status-panel.failed {
+  background: rgba(254, 226, 226, 0.52);
+  border-color: rgba(239, 68, 68, 0.32);
+}
+
+.firebase-sync-status-panel.failed .dot {
+  background: #ef4444;
+}
+
+.quick-trade-preview {
+  display: grid;
+  gap: 10px;
+  grid-column: 1 / -1;
+  padding: 12px;
+  border: 1px solid rgba(13, 148, 136, 0.24);
+  border-radius: 12px;
+  background: rgba(236, 253, 245, 0.56);
+}
+
+.quick-trade-preview-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.quick-trade-preview-head span {
+  color: #0f766e;
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.quick-trade-preview-head small,
+.quick-trade-preview-note {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.quick-trade-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.quick-trade-preview-grid > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.quick-trade-preview-grid span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.quick-trade-preview-grid strong {
+  overflow-wrap: anywhere;
+  font-size: 16px;
+}
+
+.rebuy-tabs-section {
+  padding: 10px;
+}
+
+.rebuy-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.rebuy-tab {
+  display: grid;
+  gap: 3px;
+  min-height: 58px;
+  padding: 10px 12px;
+  border: 1px solid var(--glass-line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.54);
+  color: var(--muted);
+  text-align: left;
+  font-weight: 900;
+}
+
+.rebuy-tab span {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.rebuy-tab small {
+  font-size: 12px;
+}
+
+.rebuy-tab.active {
+  border-color: rgba(13, 148, 136, 0.62);
+  background: rgba(236, 253, 245, 0.88);
+  color: #0f766e;
+  box-shadow: 0 8px 18px rgba(13, 148, 136, 0.1);
+}
+
+@media (max-width: 860px) {
+  .firebase-sync-status-panel,
+  .quick-trade-preview-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .quick-trade-preview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .report-module-tabs {
   margin-top: 18px;
   grid-template-columns: repeat(6, minmax(0, 1fr));
