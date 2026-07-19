@@ -112,6 +112,8 @@ let firebaseAutoSyncTimer = null;
 let firebaseAutoSyncInFlight = false;
 let firebaseAutoSyncQueued = false;
 let autoQuoteSyncStarted = false;
+let quickEntryReturnFocusAction = "";
+let quickEntrySubmitPending = false;
 
 window.addEventListener("hashchange", render);
 document.addEventListener("submit", onSubmit);
@@ -532,6 +534,7 @@ function navigate(path) {
 }
 
 function render() {
+  document.body.classList.toggle("quick-entry-open", Boolean(state.ui.quickEntry?.type));
   const path = currentPath();
   if (isProtectedPath(path) && !currentUser()) {
     app.innerHTML = renderAuth("login");
@@ -830,6 +833,7 @@ function renderShell(path) {
 }
 
 function renderMobileQuickDock() {
+  if (state.ui.quickEntry?.type) return "";
   const open = Boolean(state.ui.quickActionSheetOpen);
   const actions = [
     ["quick-buy", "買進", "買", "action-buy", "新增買進或回補"],
@@ -859,6 +863,7 @@ function renderMobileQuickDock() {
   `;
 }
 function renderMobileBottomNav(path) {
+  if (state.ui.quickEntry?.type) return "";
   const items = [
     ["/app/inventory", "庫存", "▦"],
     ["/app/transactions", "交易", "⇄"],
@@ -877,12 +882,13 @@ function renderMobileBottomNav(path) {
 function renderQuickEntryModal() {
   const entry = state.ui.quickEntry;
   if (!entry?.type) return "";
+  const busy = quickEntrySubmitPending;
   const type = normalizeType(entry.type);
   const isEdit = Boolean(entry.id);
   const isCash = ["DEPOSIT", "WITHDRAW", "INTEREST", "DIVIDEND"].includes(type);
   const requestedAccountId = entry.brokerAccountId || selectedBrokerAccountId();
   const allAccounts = scopedBrokerAccounts();
-  const accounts = allAccounts.filter((account) => !requestedAccountId || account.id === requestedAccountId);
+  const accounts = allAccounts;
   const defaultAccountId = requestedAccountId || allAccounts.find((account) => account.isDefault)?.id || allAccounts[0]?.id || "";
   const defaultSymbol = String(entry.symbol || getPortfolioSettings().defaultSecurity || "0050").toUpperCase();
   const defaultSecurity = state.securities.find((security) => security.symbol.toUpperCase() === defaultSymbol);
@@ -892,22 +898,23 @@ function renderQuickEntryModal() {
     : (["INTEREST", "DIVIDEND"].includes(type) ? "收益" : { BUY: "買進", SELL: "賣出", DEPOSIT: "入金", WITHDRAW: "出金" }[type] || "交易");
   return `
     <div class="quick-entry-overlay" role="dialog" aria-modal="true" aria-label="${escapeAttr(title)}">
-      <form class="quick-entry-sheet" data-form="quick-entry">
+      <form class="quick-entry-sheet" data-form="quick-entry" ${busy ? 'aria-busy="true"' : ""}>
         <input type="hidden" name="id" value="${escapeAttr(entry.id || "")}" />
         <input type="hidden" name="transactionType" value="${escapeAttr(type)}" />
         <header class="quick-entry-head">
           <div><span>快速記帳</span><strong>${escapeHtml(title)}</strong></div>
-          <button class="icon-btn" type="button" data-action="close-quick-entry" aria-label="關閉">×</button>
+          <button class="icon-btn" type="button" data-action="close-quick-entry" aria-label="關閉" ${busy ? "disabled" : ""}>×</button>
         </header>
         <div class="quick-entry-grid">
-          <div class="field"><label>日期</label><input type="date" name="tradeDate" value="${escapeAttr(entry.tradeDate || today())}" required /></div>
-          <div class="field"><label>券商帳戶</label><select name="brokerAccountId" required>${accounts.map((account) => `<option value="${account.id}" ${account.id === defaultAccountId ? "selected" : ""}>${escapeHtml(accountName(account.id))}</option>`).join("")}</select></div>
+          <div class="field"><label for="quick-entry-trade-date">日期</label><input id="quick-entry-trade-date" type="date" name="tradeDate" value="${escapeAttr(entry.tradeDate || today())}" required /></div>
+          <div class="field"><label for="quick-entry-broker-account">券商帳戶</label><select id="quick-entry-broker-account" name="brokerAccountId" required>${accounts.map((account) => `<option value="${account.id}" ${account.id === defaultAccountId ? "selected" : ""}>${escapeHtml(accountName(account.id))}</option>`).join("")}</select></div>
           ${isCash ? renderQuickCashFields(type, entry) : renderQuickTradeFields(type, entry, defaultSymbol, defaultName, defaultAccountId)}
+          ${isCash ? "" : renderQuickTradePreview(type, entry, defaultSymbol, defaultAccountId)}
+          <div class="quick-entry-error full" data-quick-entry-error role="alert" tabindex="-1" hidden></div>
         </div>
-        ${isCash ? "" : renderQuickTradePreview(type, entry, defaultSymbol, defaultAccountId)}
         <div class="quick-entry-actions">
-          <button class="btn" type="button" data-action="close-quick-entry">取消</button>
-          <button class="btn primary" type="submit">${isEdit ? "確認修改" : `儲存${escapeHtml(title)}`}</button>
+          <button class="btn" type="button" data-action="close-quick-entry" ${busy ? "disabled" : ""}>取消</button>
+          <button class="btn primary" type="submit" ${busy ? "disabled" : ""}>${isEdit ? "確認修改" : `儲存${escapeHtml(title)}`}</button>
         </div>
       </form>
     </div>
@@ -952,16 +959,17 @@ function clearMatchPickerField(field) {
 }
 
 function renderQuickTradeFields(type, entry, defaultSymbol, defaultName, accountId) {
-  const linkedOptions = quickSellLotOptions(accountId, defaultSymbol);
+  const tradeDate = entry.tradeDate || today();
+  const linkedOptions = quickSellLotOptions(accountId, defaultSymbol, tradeDate, entry.id || "");
   const excludedSellId = entry.id || "";
-  const borrowSourceOptions = borrowSourceLotOptions(accountId, defaultSymbol, entry.sourceInventoryLotId || "", excludedSellId);
+  const borrowSourceOptions = borrowSourceLotOptions(accountId, defaultSymbol, entry.sourceInventoryLotId || "", excludedSellId, tradeDate);
   const linkedValue = entry.linkedBuyTransactionId || "";
   const sellType = sellTypeForTransaction(entry);
   
   let sellFields = "";
   if (type === "SELL") {
     sellFields = `
-      <div class="field"><label>賣出方式</label><select name="sellType">
+      <div class="field"><label for="quick-entry-sell-type">賣出方式</label><select id="quick-entry-sell-type" name="sellType">
         <option value="${SELL_TYPE_REGULAR}" ${sellType === SELL_TYPE_REGULAR ? "selected" : ""}>一般賣出（扣減庫存）</option>
         <option value="${SELL_TYPE_BORROW}" ${sellType === SELL_TYPE_BORROW ? "selected" : ""}>自有庫存借券賣出（不列入一般回補清單）</option>
       </select></div>
@@ -979,16 +987,16 @@ function renderQuickTradeFields(type, entry, defaultSymbol, defaultName, account
   }
 
   return `
-    <div class="field"><label>股票代號</label><input name="symbol" value="${escapeAttr(defaultSymbol)}" required /></div>
-    <div class="field"><label>股票名稱</label><input name="securityName" value="${escapeAttr(defaultName)}" /></div>
-    <div class="field"><label>成交價</label><input type="number" inputmode="decimal" step="0.01" name="price" value="${escapeAttr(entry.price || "")}" required /></div>
-    <div class="field"><label>股數</label><input type="number" inputmode="numeric" step="1" name="shares" value="${escapeAttr(entry.shares || 100)}" required /></div>
-    <div class="field"><label>手續費</label><input type="number" inputmode="numeric" step="1" name="fee" value="${escapeAttr(entry.fee ?? "")}" placeholder="自動" /></div>
-    <div class="field"><label>交易稅</label><input type="number" inputmode="numeric" step="1" name="tax" value="${escapeAttr(entry.tax ?? "")}" placeholder="自動" /></div>
+    <div class="field"><label for="quick-entry-symbol">股票代號</label><input id="quick-entry-symbol" name="symbol" value="${escapeAttr(defaultSymbol)}" required /></div>
+    <div class="field"><label for="quick-entry-security-name">股票名稱</label><input id="quick-entry-security-name" name="securityName" value="${escapeAttr(defaultName)}" required /></div>
     ${type === "SELL" ? sellFields : ""}
+    <div class="field"><label for="quick-entry-price">成交價</label><input id="quick-entry-price" type="number" inputmode="decimal" min="0.01" step="0.01" name="price" value="${escapeAttr(entry.price || "")}" required /></div>
+    <div class="field"><label for="quick-entry-shares">股數</label><input id="quick-entry-shares" type="number" inputmode="numeric" min="1" step="1" name="shares" value="${escapeAttr(entry.shares || 100)}" required /></div>
+    <div class="field"><label for="quick-entry-fee">手續費</label><input id="quick-entry-fee" type="number" inputmode="numeric" min="0" step="1" name="fee" value="${escapeAttr(entry.fee ?? "")}" placeholder="自動" /></div>
+    <div class="field"><label for="quick-entry-tax">交易稅</label><input id="quick-entry-tax" type="number" inputmode="numeric" min="0" step="1" name="tax" value="${escapeAttr(entry.tax ?? "")}" placeholder="自動" /></div>
     ${type === "BUY" ? renderQuickBuyIntentFields(entry, defaultSymbol, accountId) : ""}
-    <div class="field"><label>分類</label><select name="strategyCategory"><option ${entry.strategyCategory === "TRADING" ? "selected" : ""}>TRADING</option><option ${entry.strategyCategory === "LONG_TERM" ? "selected" : ""}>LONG_TERM</option><option ${entry.strategyCategory === "REBUY" ? "selected" : ""}>REBUY</option><option ${entry.strategyCategory === "CORE" ? "selected" : ""}>CORE</option></select></div>
-    <div class="field full"><label>備註</label><input name="note" value="${escapeAttr(entry.note || `快捷${type === "BUY" ? "買進" : "賣出"}`)}" /></div>
+    <div class="field"><label for="quick-entry-category">分類</label><select id="quick-entry-category" name="strategyCategory"><option ${entry.strategyCategory === "TRADING" ? "selected" : ""}>TRADING</option><option ${entry.strategyCategory === "LONG_TERM" ? "selected" : ""}>LONG_TERM</option><option ${entry.strategyCategory === "REBUY" ? "selected" : ""}>REBUY</option><option ${entry.strategyCategory === "CORE" ? "selected" : ""}>CORE</option></select></div>
+    <div class="field full"><label for="quick-entry-note">備註</label><input id="quick-entry-note" name="note" value="${escapeAttr(entry.note || `快捷${type === "BUY" ? "買進" : "賣出"}`)}" /></div>
   `;
 }
 
@@ -1036,8 +1044,12 @@ function renderQuickTradePreviewFromData(data = {}) {
   );
   const inventoryBefore = sum(allLots, "remainingShares");
   const isBorrowSell = type === "SELL" && (data.sellType === SELL_TYPE_BORROW || data.borrowRebuyType === SELL_TYPE_BORROW);
+  const isRegularSell = type === "SELL" && !isBorrowSell;
   const sourceOptions = isBorrowSell
-    ? borrowSourceLotOptions(accountId, symbol, data.sourceInventoryLotId || "", data.id || "")
+    ? borrowSourceLotOptions(accountId, symbol, data.sourceInventoryLotId || "", data.id || "", data.tradeDate || today())
+    : [];
+  const regularSellOptions = isRegularSell
+    ? quickSellLotOptions(accountId, symbol, data.tradeDate || today(), data.id || "")
     : [];
   const selectedSourceIds = normalizeSourceInventoryLotIds(data.sourceInventoryLotId || "");
   const selectedSourceAvailable = sourceOptions
@@ -1060,16 +1072,22 @@ function renderQuickTradePreviewFromData(data = {}) {
   const cashBefore = toNumber(metrics.cash);
   const cashDelta = type === "BUY" ? -(gross + totalCosts) : gross - totalCosts;
   const cashAfter = cashBefore - editingCashDelta + cashDelta;
-  const sharesBefore = isBorrowSell ? selectedSourceAvailable : inventoryBefore;
+  const sharesBefore = isBorrowSell
+    ? selectedSourceAvailable
+    : isRegularSell
+      ? sum(regularSellOptions, "shares")
+      : inventoryBefore;
   const sharesAfter = isBorrowSell
     ? Math.max(0, sharesBefore + nextInventoryDelta)
-    : Math.max(0, sharesBefore - editingInventoryDelta + nextInventoryDelta);
+    : isRegularSell
+      ? Math.max(0, sharesBefore + nextInventoryDelta)
+      : Math.max(0, sharesBefore - editingInventoryDelta + nextInventoryDelta);
   const sharesBeforeLabel = isBorrowSell ? "已選來源可借" : "交易前可用庫存";
   const sharesAfterLabel = isBorrowSell ? "借出後來源餘額" : type === "BUY" ? "交易後持股" : "交易後庫存";
   const priceText = price > 0 ? fmtPrice(price) : "-";
   const cashDeltaText = cashDelta === 0 && !price ? "-" : fmtMoney(cashDelta);
   return `
-    <section class="quick-trade-preview" data-quick-trade-preview aria-label="交易前摘要">
+    <section class="quick-trade-preview" data-quick-trade-preview aria-label="交易前摘要" aria-live="polite">
       <div class="quick-trade-preview-head"><span>交易前摘要</span><small>依目前帳戶資料估算，送出前仍會重新驗證</small></div>
       <div class="quick-trade-preview-grid">
         <div><span>現金餘額</span><strong>${fmtMoney(cashBefore)}</strong></div>
@@ -1120,7 +1138,7 @@ function renderQuickBuyIntentFields(entry, symbol, accountId) {
     }));
     
   return `
-    <div class="field"><label>買入用途</label><select name="buyType">
+    <div class="field"><label for="quick-entry-buy-type">買入用途</label><select id="quick-entry-buy-type" name="buyType">
       <option value="NEW" ${buyType === "NEW" ? "selected" : ""}>一般買進</option>
       <option value="REBUY" ${buyType === "REBUY" ? "selected" : ""}>回補一般任務</option>
       <option value="BORROW_REBUY" ${buyType === "BORROW_REBUY" ? "selected" : ""}>回補借券任務</option>
@@ -1165,26 +1183,42 @@ function renderQuickCashFields(type, entry) {
     const normalizedIncomeType = normalizeType(entry.incomeType || type);
     const incomeType = ["INTEREST", "DIVIDEND"].includes(normalizedIncomeType) ? normalizedIncomeType : "INTEREST";
     return `
-      <div class="field"><label>收益類型</label><select name="incomeType"><option value="INTEREST" ${incomeType === "INTEREST" ? "selected" : ""}>存款利息</option><option value="DIVIDEND" ${incomeType === "DIVIDEND" ? "selected" : ""}>股息</option></select></div>
-      <div class="field"><label>金額</label><input type="number" inputmode="numeric" step="1" name="amount" value="${escapeAttr(entry.amount || "")}" required /></div>
-      <div class="field full"><label>備註</label><input name="note" value="${escapeAttr(entry.note || "")}" placeholder="可空白" /></div>
+      <div class="field"><label for="quick-entry-income-type">收益類型</label><select id="quick-entry-income-type" name="incomeType"><option value="INTEREST" ${incomeType === "INTEREST" ? "selected" : ""}>存款利息</option><option value="DIVIDEND" ${incomeType === "DIVIDEND" ? "selected" : ""}>股息</option></select></div>
+      <div class="field"><label for="quick-entry-amount">金額</label><input id="quick-entry-amount" type="number" inputmode="numeric" min="1" step="1" name="amount" value="${escapeAttr(entry.amount || "")}" required /></div>
+      <div class="field full"><label for="quick-entry-note">備註</label><input id="quick-entry-note" name="note" value="${escapeAttr(entry.note || "")}" placeholder="可空白" /></div>
     `;
   }
   const amountLabel = type === "WITHDRAW" ? "出金金額" : "入金金額";
   const defaultNote = type === "WITHDRAW" ? "快捷出金" : "快捷入金";
   return `
-    <div class="field full"><label>${amountLabel}</label><input type="number" inputmode="numeric" step="1" name="amount" value="${escapeAttr(entry.amount || "")}" required /></div>
-    <div class="field full"><label>備註</label><input name="note" value="${escapeAttr(entry.note || defaultNote)}" /></div>
+    <div class="field full"><label for="quick-entry-amount">${amountLabel}</label><input id="quick-entry-amount" type="number" inputmode="numeric" min="1" step="1" name="amount" value="${escapeAttr(entry.amount || "")}" required /></div>
+    <div class="field full"><label for="quick-entry-note">備註</label><input id="quick-entry-note" name="note" value="${escapeAttr(entry.note || defaultNote)}" /></div>
   `;
 }
-function quickSellLotOptions(accountId, symbol) {
-  const cleanSymbol = String(symbol || "").toUpperCase();
-  return state.buyLots
+function sellInventoryLotOptions(lots, accountId, symbol, tradeDate = today()) {
+  const cleanSymbol = String(symbol || "").trim().toUpperCase();
+  const portfolioId = selectedPortfolioId();
+  const cutoffDate = parseDate(tradeDate);
+  return lots
     .filter((lot) => lot.remainingShares > 0)
+    .filter((lot) => !portfolioId || lot.portfolioId === portfolioId)
     .filter((lot) => !accountId || lot.brokerAccountId === accountId)
+    .filter((lot) => !cutoffDate || lot.buyDate <= cutoffDate)
     .filter((lot) => securityById(lot.securityId)?.symbol.toUpperCase() === cleanSymbol)
     .sort(sortByBuyDateDesc)
     .map(lotMatchOption);
+}
+
+function quickSellLotOptions(accountId, symbol, tradeDate = today(), excludedSellId = "") {
+  const lots = borrowAdjustedInventoryLots(state.buyLots).map((lot) => ({ ...lot }));
+  if (excludedSellId) {
+    const lotById = new Map(lots.map((lot) => [lot.id, lot]));
+    for (const match of state.sellMatches.filter((item) => item.sellTransactionId === excludedSellId)) {
+      const lot = lotById.get(match.buyLotId);
+      if (lot) lot.remainingShares += toNumber(match.matchedShares);
+    }
+  }
+  return sellInventoryLotOptions(lots, accountId, symbol, tradeDate);
 }
 
 function lotMatchOption(lot) {
@@ -1272,6 +1306,7 @@ function borrowAdjustedInventoryLots(lots = state.buyLots) {
     if (borrowedShares <= 0) return lot;
     return {
       ...lot,
+      rawRemainingShares: toNumber(lot.remainingShares),
       remainingShares: Math.max(0, toNumber(lot.remainingShares) - borrowedShares),
       borrowedShares
     };
@@ -1286,10 +1321,10 @@ function reportInventoryLots(portfolioId, brokerAccountId = "ALL") {
   );
 }
 
-function borrowSourceLotOptions(accountId, symbol, selectedValue = "", excludedSellId = "") {
+function borrowSourceLotOptions(accountId, symbol, selectedValue = "", excludedSellId = "", tradeDate = today()) {
   const selectedIds = normalizeSourceInventoryLotIds(selectedValue);
   const reservations = borrowSourceReservations(excludedSellId);
-  return quickSellLotOptions(accountId, symbol)
+  return sellInventoryLotOptions(state.buyLots, accountId, symbol, tradeDate)
     .map((option) => {
       const lot = findBuyLotBySourceId(option.value);
       const reserved = lot ? toNumber(reservations.get(lotPrimarySourceId(lot))) : 0;
@@ -1298,7 +1333,7 @@ function borrowSourceLotOptions(accountId, symbol, selectedValue = "", excludedS
     .filter((option) => option.shares > 0 || selectedIds.some((id) => lotMatchesSourceId(findBuyLotBySourceId(option.value), id)));
 }
 
-function validateBorrowSellSourceLots(sourceValue, shares, account, securityId, portfolioId, excludedSellId = "") {
+function validateBorrowSellSourceLots(sourceValue, shares, account, securityId, portfolioId, excludedSellId = "", tradeDate = today()) {
   const selectedIds = normalizeSourceInventoryLotIds(sourceValue);
   if (!selectedIds.length) throw new Error("請選擇借券來源庫存。");
   const reservations = borrowSourceReservations(excludedSellId);
@@ -1313,6 +1348,7 @@ function validateBorrowSellSourceLots(sourceValue, shares, account, securityId, 
     if (lot.portfolioId !== portfolioId) throw new Error("選取的借券來源庫存不屬於目前帳本。");
     if (lot.brokerAccountId !== account.id) throw new Error("選取的借券來源庫存屬於不同券商帳戶。");
     if (lot.securityId !== securityId) throw new Error("選取的借券來源庫存和賣出股票不同。");
+    if (lot.buyDate > parseDate(tradeDate)) throw new Error("借券來源庫存的買進日期不可晚於賣出日期。");
     const available = Math.max(0, toNumber(lot.remainingShares) - toNumber(reservations.get(primaryId)));
     lots.push({ lot, available });
   }
@@ -1322,6 +1358,44 @@ function validateBorrowSellSourceLots(sourceValue, shares, account, securityId, 
     throw new Error("借出股數 (" + fmtNum(shares) + " 股) 不可超過已選來源庫存可借股數合計 (" + fmtNum(totalAvailable) + " 股" + (detail ? "：" + detail : "") + ")。");
   }
   return lots.map((item) => lotPrimarySourceId(item.lot)).join(",");
+}
+
+function validateRegularSellSourceLots(sourceValue, shares, account, securityId, portfolioId, tradeDate, excludedSellId = "") {
+  const security = securityById(securityId);
+  const options = quickSellLotOptions(account.id, security?.symbol || "", tradeDate, excludedSellId);
+  const optionByLotId = new Map();
+  for (const option of options) {
+    const lot = findBuyLotBySourceId(option.value);
+    if (lot) optionByLotId.set(lot.id, option);
+  }
+
+  const requestedIds = parseLinkedBuyIds(sourceValue);
+  const selected = [];
+  const seen = new Set();
+  if (requestedIds.length) {
+    for (const sourceId of requestedIds) {
+      const lot = findBuyLotBySourceId(sourceId);
+      if (!lot || seen.has(lot.id)) continue;
+      const option = optionByLotId.get(lot.id);
+      if (!option) throw new Error("選取的賣出庫存已不可用，請重新選擇。");
+      seen.add(lot.id);
+      selected.push(option);
+    }
+  } else {
+    let remaining = toNumber(shares);
+    for (const option of options) {
+      if (remaining <= 0) break;
+      selected.push(option);
+      remaining -= toNumber(option.shares);
+    }
+  }
+
+  const totalAvailable = selected.reduce((total, option) => total + toNumber(option.shares), 0);
+  if (toNumber(shares) > totalAvailable) {
+    throw new Error(`賣出股數 (${fmtNum(shares)} 股) 不可超過可用庫存 (${fmtNum(totalAvailable)} 股)。`);
+  }
+  if (!selected.length) throw new Error("目前沒有可賣出的庫存。");
+  return selected.map((option) => option.value).join(",");
 }
 
 function borrowSourceCostLabel(sourceValue) {
@@ -2339,7 +2413,7 @@ function renderRebuyFillSummary(task) {
 }
 function renderInventory() {
   const accountFilter = selectedBrokerAccountId();
-  const lots = filterInventoryLots(state.buyLots.filter((lot) => lot.portfolioId === selectedPortfolioId())).sort(sortInventoryLotsByPriceDesc);
+  const lots = filterInventoryLots(borrowAdjustedInventoryLots(state.buyLots).filter((lot) => lot.portfolioId === selectedPortfolioId())).sort(sortInventoryLotsByPriceDesc);
   return `
     ${renderPortfolioSnapshot(selectedPortfolioId(), accountFilter, "inventory")}
     <section class="section">
@@ -2357,6 +2431,7 @@ function renderInventory() {
         [
           ["security", "股票"],
           ["remaining", "剩餘股數"],
+          ["borrowed", "借券中"],
           ["price", "成本價"],
           ["quote", "現價"],
           ["market", "市值"],
@@ -2376,6 +2451,7 @@ function renderInventory() {
           return {
             security: escapeHtml(securityLabel(lot.securityId)),
             remaining: fmtNum(lot.remainingShares),
+            borrowed: fmtNum(lot.borrowedShares || 0),
             price: fmtPrice(lot.buyPrice),
             quote: valuation.quote ? fmtPrice(valuation.quote.price) : "-",
             market: valuation.quote ? fmtMoney(valuation.marketValue) : "-",
@@ -2385,7 +2461,7 @@ function renderInventory() {
             quoteTime: valuation.quote ? formatDateTime(valuation.quote.quoteTime) : "-",
             account: escapeHtml(accountName(lot.brokerAccountId)),
             original: fmtNum(lot.originalShares),
-            sold: fmtNum(lot.originalShares - lot.remainingShares),
+            sold: fmtNum(lot.originalShares - toNumber(lot.rawRemainingShares ?? lot.remainingShares)),
             category: escapeHtml(lot.strategyCategory || "-"),
             status: statusPill(lot.status),
             actions: lot.remainingShares > 0 ? renderInventoryLotActions(lot) : "-",
@@ -2419,7 +2495,8 @@ function renderInventoryLotMobileRow(lot, valuation) {
         <div><span>買進日</span><strong>${escapeHtml(lot.buyDate)}</strong></div>
         <div><span>券商帳戶</span><strong>${escapeHtml(accountName(lot.brokerAccountId))}</strong></div>
         <div><span>原始股數</span><strong>${fmtNum(lot.originalShares)}</strong></div>
-        <div><span>已賣出</span><strong>${fmtNum(lot.originalShares - lot.remainingShares)}</strong></div>
+        <div><span>已賣出</span><strong>${fmtNum(lot.originalShares - toNumber(lot.rawRemainingShares ?? lot.remainingShares))}</strong></div>
+        <div><span>借券中</span><strong>${fmtNum(lot.borrowedShares || 0)}</strong></div>
         <div><span>來源</span><strong title="${escapeAttr(source)}">${escapeHtml(shortSourceLabel(source))}</strong></div>
         <div class="detail-action"><span>操作</span>${lot.remainingShares > 0 ? renderInventoryLotActions(lot) : "-"}</div>
       </div>
@@ -2459,7 +2536,7 @@ function renderInventoryAccountBreakdown(accounts) {
   const portfolioId = selectedPortfolioId();
   const symbolFilter = state.ui.inventoryFilterSymbol || "ALL";
   const rows = accounts.map((account) => {
-    const accountLots = state.buyLots.filter((lot) =>
+    const accountLots = borrowAdjustedInventoryLots(state.buyLots).filter((lot) =>
       lot.portfolioId === portfolioId &&
       lot.brokerAccountId === account.id &&
       lot.remainingShares > 0 &&
@@ -2521,7 +2598,7 @@ function filterInventoryLots(lots) {
   const accountFilter = selectedBrokerAccountId();
   const symbolFilter = state.ui.inventoryFilterSymbol || "ALL";
   return lots.filter((lot) => {
-    if (lot.remainingShares <= 0) return false;
+    if (lot.remainingShares <= 0 && toNumber(lot.borrowedShares) <= 0) return false;
     if (accountFilter !== "ALL" && lot.brokerAccountId !== accountFilter) return false;
     if (symbolFilter !== "ALL" && lot.securityId !== symbolFilter) return false;
     return true;
@@ -3225,6 +3302,41 @@ async function onSubmit(event) {
   event.preventDefault();
   const name = form.dataset.form;
   const data = Object.fromEntries(new FormData(form).entries());
+  if (name === "quick-entry") {
+    if (quickEntrySubmitPending) return;
+    const formButtons = Array.from(form.querySelectorAll("button"));
+    const buttonStates = formButtons.map((button) => button.disabled);
+    const errorBox = form.querySelector("[data-quick-entry-error]");
+    quickEntrySubmitPending = true;
+    form.setAttribute("aria-busy", "true");
+    formButtons.forEach((button) => { button.disabled = true; });
+    if (errorBox) {
+      errorBox.hidden = true;
+      errorBox.textContent = "";
+    }
+    try {
+      await handleQuickEntrySubmit(data);
+    } catch (error) {
+      console.warn(error?.message || error);
+      if (errorBox?.isConnected) {
+        errorBox.textContent = formatFirebaseError(error);
+        errorBox.hidden = false;
+        errorBox.focus();
+        errorBox.scrollIntoView({ block: "nearest" });
+      } else {
+        showToast(formatFirebaseError(error));
+      }
+    } finally {
+      quickEntrySubmitPending = false;
+      if (form.isConnected) {
+        form.removeAttribute("aria-busy");
+        formButtons.forEach((button, index) => { button.disabled = buttonStates[index]; });
+      } else if (state.ui.quickEntry?.type) {
+        render();
+      }
+    }
+    return;
+  }
   try {
     if (name === "register") return handleRegister(data);
     if (name === "login") return handleLogin(data);
@@ -3235,7 +3347,6 @@ async function onSubmit(event) {
     if (name === "template-create") return handleTemplateCreate(data);
     if (name === "security-create") return handleSecurityCreate(data);
     if (name === "manual-transaction") return await handleManualTransaction(data);
-    if (name === "quick-entry") return await handleQuickEntrySubmit(data);
     if (name === "quote-sync") return handleQuoteSync(data);
     if (name === "cash-transfer") return handleCashTransfer(data);
     if (name === "position-transfer") return handlePositionTransfer(data);
@@ -3272,7 +3383,10 @@ async function onClick(event) {
     if (action === "quick-deposit") return openQuickEntry("DEPOSIT");
     if (action === "quick-income") return openQuickEntry("INTEREST");
     if (action === "quick-withdraw") return openQuickEntry("WITHDRAW");
-    if (action === "close-quick-entry") return closeQuickEntry();
+    if (action === "close-quick-entry") {
+      if (quickEntrySubmitPending) return showToast("交易處理中，請稍候。");
+      return closeQuickEntry();
+    }
     if (action === "toggle-match-lot") return handleMatchLotToggle(actionButton);
     if (action === "clear-match-picker") return handleClearMatchPicker(actionButton);
     if (action === "apply-transaction-filters") return handleApplyTransactionFilters();
@@ -3466,9 +3580,17 @@ function onChange(event) {
     updateQuickTradePreview(sheet);
     return;
   }
-  if (["brokerAccountId", "symbol"].includes(event.target.name) && event.target.closest('form[data-form="quick-entry"]')) {
+  if (["brokerAccountId", "symbol", "tradeDate"].includes(event.target.name) && event.target.closest('form[data-form="quick-entry"]')) {
     const form = event.target.closest('form[data-form="quick-entry"]');
+    const grid = form.querySelector(".quick-entry-grid");
+    const scrollTop = grid?.scrollTop || 0;
+    const focusedName = event.target.name;
     const data = Object.fromEntries(new FormData(form).entries());
+    if (focusedName === "symbol") {
+      data.symbol = String(data.symbol || "").trim().toUpperCase();
+      const security = state.securities.find((item) => String(item.symbol || "").toUpperCase() === data.symbol);
+      data.securityName = security?.name || "";
+    }
     data.linkedBuyTransactionId = "";
     data.rebuySellTransactionIds = "";
     data.sourceInventoryLotId = "";
@@ -3476,6 +3598,12 @@ function onChange(event) {
     state.ui.quickEntry = { ...state.ui.quickEntry, ...data, type: normalizeType(data.transactionType), brokerAccountId: data.brokerAccountId };
     persist();
     render();
+    window.setTimeout(() => {
+      const nextForm = document.querySelector('form[data-form="quick-entry"]');
+      const nextGrid = nextForm?.querySelector(".quick-entry-grid");
+      if (nextGrid) nextGrid.scrollTop = scrollTop;
+      nextForm?.querySelector(`[name="${focusedName}"]`)?.focus();
+    }, 0);
     return;
   }
   if (event.target.id === "portfolio-select") {
@@ -3530,6 +3658,33 @@ function onChange(event) {
 }
 
 function onKeydown(event) {
+  const quickEntryDialog = document.querySelector(".quick-entry-overlay");
+  if (quickEntryDialog) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (quickEntrySubmitPending) {
+        showToast("交易處理中，請稍候。");
+        return;
+      }
+      closeQuickEntry();
+      return;
+    }
+    if (event.key === "Tab") {
+      const focusable = Array.from(quickEntryDialog.querySelectorAll('button:not([disabled]), input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+        .filter((element) => !element.hidden && element.getClientRects().length > 0);
+      if (focusable.length) {
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    }
+  }
   if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
   if (["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName)) return;
   const key = event.key.toLowerCase();
@@ -3776,17 +3931,23 @@ function handleTemplateCreate(data) {
 }
 
 function openQuickEntry(type, defaults = {}) {
+  quickEntryReturnFocusAction = document.activeElement?.dataset?.action || "";
   state.ui.quickActionSheetOpen = false;
   state.ui.quickEntry = { brokerAccountId: selectedBrokerAccountId(), type: normalizeType(type), ...defaults };
   persist();
   render();
-  window.setTimeout(() => document.querySelector(".quick-entry-sheet input, .quick-entry-sheet select")?.focus(), 80);
+  window.setTimeout(() => document.querySelector('.quick-entry-sheet input[name="tradeDate"]')?.focus(), 80);
 }
 
 function closeQuickEntry() {
+  const returnFocusAction = quickEntryReturnFocusAction;
   state.ui.quickEntry = null;
   persist();
   render();
+  window.setTimeout(() => {
+    const preferred = returnFocusAction ? document.querySelector(`[data-action="${returnFocusAction}"]`) : null;
+    (preferred || document.querySelector('[aria-label="開啟快速記帳"]') || document.querySelector('[data-action="quick-buy"]'))?.focus();
+  }, 0);
 }
 
 function handleMatchLotToggle(button) {
@@ -3879,6 +4040,45 @@ function refreshMatchPicker(picker, ids) {
   updateQuickTradePreview(picker.closest('form[data-form="quick-entry"]'));
 }
 
+function validateQuickEntryValues(data, type) {
+  const tradeDate = String(data.tradeDate || "").trim();
+  const parsedDate = parseDate(tradeDate);
+  const dateValue = new Date(`${parsedDate}T00:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(tradeDate) || Number.isNaN(dateValue.valueOf()) || dateValue.toISOString().slice(0, 10) !== parsedDate) {
+    throw new Error("請輸入有效的交易日期。");
+  }
+  data.tradeDate = parsedDate;
+
+  if (["DEPOSIT", "WITHDRAW", "INTEREST", "DIVIDEND"].includes(type)) {
+    const amount = Number(data.amount);
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error("金額必須大於 0。");
+    data.amount = amount;
+    return;
+  }
+
+  const symbol = String(data.symbol || "").trim().toUpperCase();
+  const existingSecurity = state.securities.find((item) => String(item.symbol || "").toUpperCase() === symbol);
+  const securityName = existingSecurity?.name || String(data.securityName || "").trim();
+  if (!symbol) throw new Error("請輸入股票代號。");
+  if (!securityName) throw new Error("請輸入股票名稱。");
+
+  const price = Number(data.price);
+  const shares = Number(data.shares);
+  if (!Number.isFinite(price) || price <= 0) throw new Error("成交價必須大於 0。");
+  if (!Number.isSafeInteger(shares) || shares <= 0) throw new Error("股數必須是大於 0 的整數。");
+  for (const field of ["fee", "tax"]) {
+    const raw = String(data[field] ?? "").trim();
+    if (raw === "") continue;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0) throw new Error(`${field === "fee" ? "手續費" : "交易稅"}不可為負數。`);
+    data[field] = value;
+  }
+  data.symbol = symbol;
+  data.securityName = securityName;
+  data.price = price;
+  data.shares = shares;
+}
+
 async function handleQuickEntrySubmit(data) {
   let type = normalizeType(data.transactionType);
   const incomeType = normalizeType(data.incomeType);
@@ -3886,6 +4086,7 @@ async function handleQuickEntrySubmit(data) {
   const portfolioId = selectedPortfolioId();
   const account = state.brokerAccounts.find((item) => item.id === data.brokerAccountId && item.portfolioId === portfolioId);
   if (!account) throw new Error("請先選擇券商帳戶");
+  validateQuickEntryValues(data, type);
 
   const isEdit = Boolean(data.id);
 
@@ -3898,8 +4099,6 @@ async function handleQuickEntrySubmit(data) {
     const tx = state.appTransactions.find((t) => t.id === data.id);
     if (!tx) throw new Error("找不到要修改的交易");
     const oldTx = clone(tx);
-
-    state.ui.quickEntry = null;
 
     if (["DEPOSIT", "WITHDRAW", "INTEREST", "DIVIDEND"].includes(type)) {
       tx.tradeDate = parseDate(data.tradeDate);
@@ -3931,9 +4130,11 @@ async function handleQuickEntrySubmit(data) {
       if (type === "SELL") {
         const sellFields = resolveSellMatchingFields(data);
         borrowRebuyType = sellFields.borrowRebuyType;
-        data.linkedBuyTransactionId = sellFields.linkedBuyTransactionId;
         if (borrowRebuyType === "BORROW_SELL") {
-          sourceInventoryLotId = validateBorrowSellSourceLots(sellFields.sourceInventoryLotId, data.shares, account, securityForCosts.id, portfolioId, data.id);
+          sourceInventoryLotId = validateBorrowSellSourceLots(sellFields.sourceInventoryLotId, data.shares, account, securityForCosts.id, portfolioId, data.id, data.tradeDate);
+          data.linkedBuyTransactionId = "";
+        } else {
+          data.linkedBuyTransactionId = validateRegularSellSourceLots(sellFields.linkedBuyTransactionId, data.shares, account, securityForCosts.id, portfolioId, data.tradeDate, data.id);
         }
       } else if (type === "BUY") {
         const buyType = String(data.buyType || "").trim();
@@ -3944,6 +4145,7 @@ async function handleQuickEntrySubmit(data) {
           
           const cycle = state.borrowRebuyCycles.find((c) => c.id === rebuyCycleId);
           if (!cycle) throw new Error("找不到對應的借券任務。");
+          if (cycle.sellDate > data.tradeDate) throw new Error("借券回補日期不可早於原賣出日期。");
           const shares = toNumber(data.shares);
           const currentSharesInCycle = isEdit ? oldTx.shares : 0;
           if (shares > (cycle.remainingRebuyQty + currentSharesInCycle)) {
@@ -3958,9 +4160,11 @@ async function handleQuickEntrySubmit(data) {
             const task = tasksBySellId.get(sellId);
             const currentLinked = String(oldTx.rebuySellTransactionIds || "").split(/[,\s]+/).includes(sellId);
             if (!currentLinked && (!task || rebuyTaskIsArchived(task))) throw new Error("選到的回補任務不存在或已完成，請重新選擇。");
+            if (!task) throw new Error("選到的回補任務不存在，請重新選擇。");
             if (task.portfolioId !== portfolioId) throw new Error("選到的回補任務不屬於目前帳本，請重新選擇。");
             if (task.securityId !== securityForCosts.id) throw new Error("選到的回補任務和買入股票不同，請重新選擇。");
             if (task.brokerAccountId !== account.id) throw new Error("選到的回補任務屬於不同券商帳戶，請切換帳戶或改選。");
+            if (task.sellDate > data.tradeDate) throw new Error("回補日期不可早於原賣出日期。");
           }
         } else {
           buyIntent = "NEW";
@@ -3992,11 +4196,11 @@ async function handleQuickEntrySubmit(data) {
     normalizeTransaction(tx);
 
     auditLog("UPDATE", "app_transaction", tx.id, oldTx, tx, portfolioId);
+    state.ui.quickEntry = null;
     commit("交易已修改");
     return;
   }
 
-  state.ui.quickEntry = null;
   if (["DEPOSIT", "WITHDRAW", "INTEREST", "DIVIDEND"].includes(type)) {
     await handleManualTransaction({
       tradeDate: data.tradeDate,
@@ -4012,6 +4216,7 @@ async function handleQuickEntrySubmit(data) {
       linkedBuyTransactionId: "",
       note: data.note
     });
+    closeQuickEntry();
     showToast(`${tradeTypeLabel(type)}已記錄`);
     return;
   }
@@ -4028,9 +4233,11 @@ async function handleQuickEntrySubmit(data) {
   if (type === "SELL") {
     const sellFields = resolveSellMatchingFields(data);
     borrowRebuyType = sellFields.borrowRebuyType;
-    data.linkedBuyTransactionId = sellFields.linkedBuyTransactionId;
     if (borrowRebuyType === "BORROW_SELL") {
-      sourceInventoryLotId = validateBorrowSellSourceLots(sellFields.sourceInventoryLotId, data.shares, account, securityForCosts.id, portfolioId);
+      sourceInventoryLotId = validateBorrowSellSourceLots(sellFields.sourceInventoryLotId, data.shares, account, securityForCosts.id, portfolioId, "", data.tradeDate);
+      data.linkedBuyTransactionId = "";
+    } else {
+      data.linkedBuyTransactionId = validateRegularSellSourceLots(sellFields.linkedBuyTransactionId, data.shares, account, securityForCosts.id, portfolioId, data.tradeDate);
     }
   } else if (type === "BUY") {
     const buyType = String(data.buyType || "").trim();
@@ -4041,6 +4248,7 @@ async function handleQuickEntrySubmit(data) {
       
       const cycle = state.borrowRebuyCycles.find((c) => c.id === rebuyCycleId);
       if (!cycle) throw new Error("找不到對應的借券任務。");
+      if (cycle.sellDate > data.tradeDate) throw new Error("借券回補日期不可早於原賣出日期。");
       const shares = toNumber(data.shares);
       if (shares > cycle.remainingRebuyQty) {
         throw new Error(`回補股數 (${shares} 股) 不可超過待回補股數 (${cycle.remainingRebuyQty} 股)。`);
@@ -4056,6 +4264,7 @@ async function handleQuickEntrySubmit(data) {
         if (task.portfolioId !== portfolioId) throw new Error("選到的回補任務不屬於目前帳本，請重新選擇。");
         if (task.securityId !== securityForCosts.id) throw new Error("選到的回補任務和買入股票不同，請重新選擇。");
         if (task.brokerAccountId !== account.id) throw new Error("選到的回補任務屬於不同券商帳戶，請切換帳戶或改選。");
+        if (task.sellDate > data.tradeDate) throw new Error("回補日期不可早於原賣出日期。");
       }
     } else {
       buyIntent = "NEW";
@@ -4081,6 +4290,7 @@ async function handleQuickEntrySubmit(data) {
     rebuyCycleId,
     note: data.note
   });
+  closeQuickEntry();
   showToast(`${type === "BUY" ? "買進" : "賣出"}已記錄；請記得上傳同日券商交易紀錄對帳。`);
 }
 
@@ -4489,10 +4699,11 @@ function yahooSymbolForSecurity(security) {
   return `${symbol}.TW`;
 }
 function handleSellLot(buyTransactionId) {
-  const lot = state.buyLots.find((item) => item.buyTransactionId === buyTransactionId || item.sourceTransactionId === buyTransactionId);
+  const adjustedLots = borrowAdjustedInventoryLots(state.buyLots);
+  const lot = adjustedLots.find((item) => item.buyTransactionId === buyTransactionId || item.sourceTransactionId === buyTransactionId);
   if (!lot || lot.remainingShares <= 0) throw new Error("找不到可賣出的庫存 lot");
   const security = securityById(lot.securityId);
-  const sameInventoryLots = state.buyLots
+  const sameInventoryLots = adjustedLots
     .filter((item) => item.remainingShares > 0 && item.brokerAccountId === lot.brokerAccountId && item.securityId === lot.securityId)
     .sort((a, b) => {
       if (a.id === lot.id) return -1;

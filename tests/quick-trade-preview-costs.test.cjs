@@ -55,7 +55,10 @@ const preview = JSON.parse(vm.runInContext([
   "const editBuy = renderQuickTradePreviewFromData({ id: 'edit-buy', transactionType: 'BUY', brokerAccountId: 'account-1', symbol: '0050', price: 50, shares: 1000, fee: '0', tax: '0' });",
   "const editSell = renderQuickTradePreviewFromData({ id: 'edit-sell', transactionType: 'SELL', sellType: 'REGULAR_SELL', brokerAccountId: 'account-1', symbol: '0050', price: 100, shares: 100, fee: '0', tax: '0', linkedBuyTransactionId: 'edit-buy' });",
   "const editSellShares = renderQuickTradePreviewFromData({ id: 'edit-sell', transactionType: 'SELL', sellType: 'REGULAR_SELL', brokerAccountId: 'account-1', symbol: '0050', price: 100, shares: 80, fee: '0', tax: '0', linkedBuyTransactionId: 'edit-buy' });",
-  "JSON.stringify({ manual, automatic, unknownSecurity, editBuy, editSell, editSellShares })"
+  "state.appTransactions.push({ id: 'future-buy', userId: 'user-1', portfolioId: 'portfolio-1', brokerId: 'broker-1', brokerAccountId: 'account-1', securityId: 'sec-0050', transactionType: 'BUY', tradeDate: '2026-07-10', price: 60, shares: 500, fee: 0, tax: 0 });",
+  "recomputeAll();",
+  "const backdatedSell = renderQuickTradePreviewFromData({ transactionType: 'SELL', sellType: 'REGULAR_SELL', brokerAccountId: 'account-1', symbol: '0050', tradeDate: '2026-07-05', price: 100, shares: 100, fee: '0', tax: '0' });",
+  "JSON.stringify({ manual, automatic, unknownSecurity, editBuy, editSell, editSellShares, backdatedSell })"
 ].join("\n"), context));
 
 assert.match(preview.manual, /99,421/);
@@ -70,4 +73,7 @@ assert.match(preview.editSell, /交易後庫存<\/span><strong>950 股<\/strong>
 assert.match(preview.editSell, /交易後現金<\/span><strong>\$960,000<\/strong>/);
 assert.match(preview.editSellShares, /交易後庫存<\/span><strong>950 股<\/strong>/);
 assert.match(preview.editSellShares, /交易後現金<\/span><strong>\$958,000<\/strong>/);
+assert.match(preview.backdatedSell, /交易前可用庫存<\/span><strong>950 股<\/strong>/);
+assert.match(preview.backdatedSell, /交易後庫存<\/span><strong>850 股<\/strong>/);
+assert.doesNotMatch(preview.backdatedSell, /1,450 股/);
 console.log("quick trade preview costs: PASS");
