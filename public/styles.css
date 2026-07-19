@@ -626,7 +626,7 @@ canvas {
     opacity 180ms ease,
     transform 180ms ease;
   pointer-events: none;
-  z-index: 10;
+  z-index: 120;
 }
 
 .toast.show {
@@ -1752,11 +1752,16 @@ body {
 .quick-entry-overlay {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  z-index: 100;
   display: grid;
   align-items: end;
   background: rgba(15, 23, 42, 0.28);
   padding: 16px max(12px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  overscroll-behavior: contain;
+}
+
+body.quick-entry-open {
+  overflow: hidden;
 }
 
 .quick-entry-sheet {
@@ -1772,6 +1777,11 @@ body {
   display: flex;
   flex-direction: column;
   max-height: 90vh;
+  overflow: hidden;
+}
+
+.quick-entry-sheet [hidden] {
+  display: none !important;
 }
 
 .quick-entry-head {
@@ -1819,6 +1829,8 @@ body {
   overflow-y: auto;
   min-height: 0;
   padding: 4px;
+  scroll-padding-block: 12px 88px;
+  overscroll-behavior: contain;
 }
 
 .quick-entry-grid .full {
@@ -1835,6 +1847,17 @@ body {
 
 .quick-entry-actions .btn {
   min-height: 48px;
+}
+
+.quick-entry-error {
+  padding: 10px 12px;
+  border: 1px solid rgba(220, 38, 38, 0.32);
+  border-radius: 8px;
+  background: rgba(254, 226, 226, 0.72);
+  color: #991b1b;
+  font-size: 13px;
+  font-weight: 850;
+  line-height: 1.45;
 }
 
 .fee-settings {
@@ -1878,12 +1901,11 @@ body {
 
 @media (max-width: 860px) {
   .quick-entry-overlay {
-    padding-bottom: calc(50px + env(safe-area-inset-bottom));
+    padding: 12px max(8px, env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
   }
 
   .quick-entry-sheet {
-    max-height: calc(100svh - 80px);
-    overflow: hidden;
+    max-height: calc(100dvh - 24px - env(safe-area-inset-bottom));
   }
 
   .quick-entry-grid {
@@ -3184,7 +3206,7 @@ td {
 
   .quick-entry-overlay {
     align-items: end;
-    padding: 12px 12px calc(50px + env(safe-area-inset-bottom));
+    padding: 12px max(8px, env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
     background: rgba(15, 23, 42, 0.22);
   }
 
@@ -3192,7 +3214,7 @@ td {
     width: min(100%, 560px);
     border-radius: 28px 28px 22px 22px;
     padding: 16px;
-    max-height: calc(100svh - 80px);
+    max-height: calc(100dvh - 24px - env(safe-area-inset-bottom));
     overflow: hidden;
   }
 
@@ -3532,7 +3554,7 @@ td {
   }
 
   .quick-entry-actions {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr 1.25fr;
   }
 }
 
