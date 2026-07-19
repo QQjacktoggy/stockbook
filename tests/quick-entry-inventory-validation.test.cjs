@@ -46,7 +46,7 @@ context.fixture = {
   sessions: { currentUserId: "user-1" },
   portfolios: [{ id: "portfolio-1", userId: "user-1", name: "0050" }],
   portfolioMembers: [],
-  brokerAccounts: [{ id: "account-1", portfolioId: "portfolio-1", brokerId: "broker-1", accountName: "Test" }],
+  brokerAccounts: [{ id: "account-1", portfolioId: "portfolio-1", brokerId: "broker-1", accountName: "Test", isActive: true, isDefault: true }],
   securities: [{ id: "sec-0050", symbol: "0050", name: "元大台灣50" }],
   manualClosedRebuySellIds: [],
   appTransactions: [
@@ -75,6 +75,8 @@ const actual = JSON.parse(vm.runInContext([
   "state.appTransactions.push({ ...fixture.appTransactions[0], id: 'regular-sell', transactionType: 'SELL', tradeDate: '2026-07-08', price: 103, shares: 500, linkedBuyTransactionId: autoLinked });",
   "recomputeAll();",
   "const displayLot = borrowAdjustedInventoryLots(state.buyLots).find((lot) => lotMatchesSourceId(lot, 'buy-early'));",
+  "const fullyBorrowedLot = { ...displayLot, rawRemainingShares: 500, remainingShares: 0, borrowedShares: 500 };",
+  "const fullyBorrowedHtml = renderInventoryLotMobileRow(fullyBorrowedLot, { quote: null, marketValue: 0, unrealized: 0 });",
   "JSON.stringify({",
   "  beforeOptionCount: beforeOptions.length,",
   "  beforeAvailable: beforeOptions.reduce((total, option) => total + option.shares, 0),",
@@ -87,7 +89,9 @@ const actual = JSON.parse(vm.runInContext([
   "  adjustedRemaining: borrowAdjustedInventoryLots(state.buyLots).reduce((total, lot) => total + lot.remainingShares, 0),",
   "  displayRawRemaining: displayLot.rawRemainingShares,",
   "  displayRemaining: displayLot.remainingShares,",
-  "  displayBorrowed: displayLot.borrowedShares",
+  "  displayBorrowed: displayLot.borrowedShares,",
+  "  fullyBorrowedVisible: filterInventoryLots([fullyBorrowedLot]).length,",
+  "  fullyBorrowedHtml",
   "})"
 ].join("\n"), context));
 
@@ -103,4 +107,8 @@ assert.equal(actual.adjustedRemaining, 600, "regular sells and borrow reservatio
 assert.equal(actual.displayRawRemaining, 500, "inventory display must retain the pre-borrow lot balance for sold-share reporting");
 assert.equal(actual.displayRemaining, 100, "inventory display must show borrow-adjusted available shares");
 assert.equal(actual.displayBorrowed, 400, "inventory display must expose the shares currently on loan");
+assert.equal(actual.fullyBorrowedVisible, 1, "fully borrowed lots must remain visible in inventory");
+assert.match(actual.fullyBorrowedHtml, /剩餘<\/small><strong>0<\/strong>/);
+assert.match(actual.fullyBorrowedHtml, /借券中<\/span><strong>500<\/strong>/);
+assert.doesNotMatch(actual.fullyBorrowedHtml, /data-action="sell-lot"/);
 console.log("quick entry inventory validation: PASS");

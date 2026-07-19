@@ -882,6 +882,7 @@ function renderMobileBottomNav(path) {
 function renderQuickEntryModal() {
   const entry = state.ui.quickEntry;
   if (!entry?.type) return "";
+  const busy = quickEntrySubmitPending;
   const type = normalizeType(entry.type);
   const isEdit = Boolean(entry.id);
   const isCash = ["DEPOSIT", "WITHDRAW", "INTEREST", "DIVIDEND"].includes(type);
@@ -897,12 +898,12 @@ function renderQuickEntryModal() {
     : (["INTEREST", "DIVIDEND"].includes(type) ? "收益" : { BUY: "買進", SELL: "賣出", DEPOSIT: "入金", WITHDRAW: "出金" }[type] || "交易");
   return `
     <div class="quick-entry-overlay" role="dialog" aria-modal="true" aria-label="${escapeAttr(title)}">
-      <form class="quick-entry-sheet" data-form="quick-entry">
+      <form class="quick-entry-sheet" data-form="quick-entry" ${busy ? 'aria-busy="true"' : ""}>
         <input type="hidden" name="id" value="${escapeAttr(entry.id || "")}" />
         <input type="hidden" name="transactionType" value="${escapeAttr(type)}" />
         <header class="quick-entry-head">
           <div><span>快速記帳</span><strong>${escapeHtml(title)}</strong></div>
-          <button class="icon-btn" type="button" data-action="close-quick-entry" aria-label="關閉">×</button>
+          <button class="icon-btn" type="button" data-action="close-quick-entry" aria-label="關閉" ${busy ? "disabled" : ""}>×</button>
         </header>
         <div class="quick-entry-grid">
           <div class="field"><label for="quick-entry-trade-date">日期</label><input id="quick-entry-trade-date" type="date" name="tradeDate" value="${escapeAttr(entry.tradeDate || today())}" required /></div>
@@ -912,8 +913,8 @@ function renderQuickEntryModal() {
           <div class="quick-entry-error full" data-quick-entry-error role="alert" tabindex="-1" hidden></div>
         </div>
         <div class="quick-entry-actions">
-          <button class="btn" type="button" data-action="close-quick-entry">取消</button>
-          <button class="btn primary" type="submit">${isEdit ? "確認修改" : `儲存${escapeHtml(title)}`}</button>
+          <button class="btn" type="button" data-action="close-quick-entry" ${busy ? "disabled" : ""}>取消</button>
+          <button class="btn primary" type="submit" ${busy ? "disabled" : ""}>${isEdit ? "確認修改" : `儲存${escapeHtml(title)}`}</button>
         </div>
       </form>
     </div>
@@ -1043,8 +1044,12 @@ function renderQuickTradePreviewFromData(data = {}) {
   );
   const inventoryBefore = sum(allLots, "remainingShares");
   const isBorrowSell = type === "SELL" && (data.sellType === SELL_TYPE_BORROW || data.borrowRebuyType === SELL_TYPE_BORROW);
+  const isRegularSell = type === "SELL" && !isBorrowSell;
   const sourceOptions = isBorrowSell
-    ? borrowSourceLotOptions(accountId, symbol, data.sourceInventoryLotId || "", data.id || "")
+    ? borrowSourceLotOptions(accountId, symbol, data.sourceInventoryLotId || "", data.id || "", data.tradeDate || today())
+    : [];
+  const regularSellOptions = isRegularSell
+    ? quickSellLotOptions(accountId, symbol, data.tradeDate || today(), data.id || "")
     : [];
   const selectedSourceIds = normalizeSourceInventoryLotIds(data.sourceInventoryLotId || "");
   const selectedSourceAvailable = sourceOptions
@@ -1067,10 +1072,16 @@ function renderQuickTradePreviewFromData(data = {}) {
   const cashBefore = toNumber(metrics.cash);
   const cashDelta = type === "BUY" ? -(gross + totalCosts) : gross - totalCosts;
   const cashAfter = cashBefore - editingCashDelta + cashDelta;
-  const sharesBefore = isBorrowSell ? selectedSourceAvailable : inventoryBefore;
+  const sharesBefore = isBorrowSell
+    ? selectedSourceAvailable
+    : isRegularSell
+      ? sum(regularSellOptions, "shares")
+      : inventoryBefore;
   const sharesAfter = isBorrowSell
     ? Math.max(0, sharesBefore + nextInventoryDelta)
-    : Math.max(0, sharesBefore - editingInventoryDelta + nextInventoryDelta);
+    : isRegularSell
+      ? Math.max(0, sharesBefore + nextInventoryDelta)
+      : Math.max(0, sharesBefore - editingInventoryDelta + nextInventoryDelta);
   const sharesBeforeLabel = isBorrowSell ? "已選來源可借" : "交易前可用庫存";
   const sharesAfterLabel = isBorrowSell ? "借出後來源餘額" : type === "BUY" ? "交易後持股" : "交易後庫存";
   const priceText = price > 0 ? fmtPrice(price) : "-";
@@ -2587,7 +2598,7 @@ function filterInventoryLots(lots) {
   const accountFilter = selectedBrokerAccountId();
   const symbolFilter = state.ui.inventoryFilterSymbol || "ALL";
   return lots.filter((lot) => {
-    if (lot.remainingShares <= 0) return false;
+    if (lot.remainingShares <= 0 && toNumber(lot.borrowedShares) <= 0) return false;
     if (accountFilter !== "ALL" && lot.brokerAccountId !== accountFilter) return false;
     if (symbolFilter !== "ALL" && lot.securityId !== symbolFilter) return false;
     return true;
@@ -3293,11 +3304,12 @@ async function onSubmit(event) {
   const data = Object.fromEntries(new FormData(form).entries());
   if (name === "quick-entry") {
     if (quickEntrySubmitPending) return;
-    const submitButton = form.querySelector('button[type="submit"]');
+    const formButtons = Array.from(form.querySelectorAll("button"));
+    const buttonStates = formButtons.map((button) => button.disabled);
     const errorBox = form.querySelector("[data-quick-entry-error]");
     quickEntrySubmitPending = true;
     form.setAttribute("aria-busy", "true");
-    if (submitButton) submitButton.disabled = true;
+    formButtons.forEach((button) => { button.disabled = true; });
     if (errorBox) {
       errorBox.hidden = true;
       errorBox.textContent = "";
@@ -3318,7 +3330,9 @@ async function onSubmit(event) {
       quickEntrySubmitPending = false;
       if (form.isConnected) {
         form.removeAttribute("aria-busy");
-        if (submitButton) submitButton.disabled = false;
+        formButtons.forEach((button, index) => { button.disabled = buttonStates[index]; });
+      } else if (state.ui.quickEntry?.type) {
+        render();
       }
     }
     return;
@@ -3369,7 +3383,10 @@ async function onClick(event) {
     if (action === "quick-deposit") return openQuickEntry("DEPOSIT");
     if (action === "quick-income") return openQuickEntry("INTEREST");
     if (action === "quick-withdraw") return openQuickEntry("WITHDRAW");
-    if (action === "close-quick-entry") return closeQuickEntry();
+    if (action === "close-quick-entry") {
+      if (quickEntrySubmitPending) return showToast("交易處理中，請稍候。");
+      return closeQuickEntry();
+    }
     if (action === "toggle-match-lot") return handleMatchLotToggle(actionButton);
     if (action === "clear-match-picker") return handleClearMatchPicker(actionButton);
     if (action === "apply-transaction-filters") return handleApplyTransactionFilters();
@@ -3645,6 +3662,10 @@ function onKeydown(event) {
   if (quickEntryDialog) {
     if (event.key === "Escape") {
       event.preventDefault();
+      if (quickEntrySubmitPending) {
+        showToast("交易處理中，請稍候。");
+        return;
+      }
       closeQuickEntry();
       return;
     }
