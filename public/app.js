@@ -1278,6 +1278,14 @@ function borrowAdjustedInventoryLots(lots = state.buyLots) {
   });
 }
 
+function reportInventoryLots(portfolioId, brokerAccountId = "ALL") {
+  return borrowAdjustedInventoryLots(state.buyLots).filter((lot) =>
+    lot.portfolioId === portfolioId &&
+    reportAccountMatches(lot, brokerAccountId) &&
+    toNumber(lot.remainingShares) > 0
+  );
+}
+
 function borrowSourceLotOptions(accountId, symbol, selectedValue = "", excludedSellId = "") {
   const selectedIds = normalizeSourceInventoryLotIds(selectedValue);
   const reservations = borrowSourceReservations(excludedSellId);
@@ -6708,8 +6716,7 @@ function buildPdfReportModel(portfolioId, brokerAccountId = reportBrokerAccountI
   const yearProfitEvents = profitEvents.filter((event) => String(event.date || "").startsWith(reportYear));
   const monthDailyRows = summarizeProfitEventsBy(monthProfitEvents, (event) => event.date);
   const yearMonthlyRows = summarizeProfitEventsBy(yearProfitEvents, (event) => String(event.date || "").slice(0, 7));
-  const inventoryLots = state.buyLots
-    .filter((lot) => lot.portfolioId === portfolioId && reportAccountMatches(lot, brokerAccountId) && toNumber(lot.remainingShares) > 0)
+  const inventoryLots = reportInventoryLots(portfolioId, brokerAccountId)
     .slice()
     .sort(sortInventoryLotsByPriceDesc);
   const assetSeries = reportAssetSeries(portfolioId, transactions, brokerAccountId);
@@ -7592,7 +7599,7 @@ function benchmarkPerformanceReportRows(portfolioId, brokerAccountId = "ALL") {
   const transactions = scopedTransactions(portfolioId).filter((tx) => reportAccountMatches(tx, brokerAccountId)).slice().sort(sortByDateAsc);
   const matches = state.sellMatches.filter((match) => match.portfolioId === portfolioId && reportAccountMatches(match, brokerAccountId));
   const reportDate = latestBenchmarkReportDate(portfolioId, brokerAccountId, transactions, matches);
-  const inventoryLots = state.buyLots.filter((lot) => lot.portfolioId === portfolioId && reportAccountMatches(lot, brokerAccountId) && toNumber(lot.remainingShares) > 0);
+  const inventoryLots = reportInventoryLots(portfolioId, brokerAccountId);
   const benchmark = build0050BenchmarkModel(portfolioId, brokerAccountId, transactions, inventoryLots, reportDate);
   return {
     columns: [
