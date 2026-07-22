@@ -10,9 +10,10 @@ assert.match(
   /class="quick-entry-grid">[\s\S]*renderQuickTradePreview\(type, entry, defaultSymbol, defaultAccountId\)[\s\S]*data-quick-entry-error[\s\S]*<\/div>\s*<div class="quick-entry-actions">/,
   "the preview and inline error must scroll with the quick-entry fields"
 );
-assert.match(app, /function renderMobileQuickDock\(\)[\s\S]*state\.ui\.quickEntry\?\.type\) return "";/);
-assert.match(app, /function renderMobileBottomNav\(path\)[\s\S]*state\.ui\.quickEntry\?\.type\) return "";/);
+assert.match(app, /function renderMobileQuickDock\(\)[\s\S]*state\.ui\.quickEntry\?\.type \|\| state\.ui\.inventoryCostExchangeOpen\) return "";/);
+assert.match(app, /function renderMobileBottomNav\(path\)[\s\S]*state\.ui\.quickEntry\?\.type \|\| state\.ui\.inventoryCostExchangeOpen\) return "";/);
 assert.match(app, /role="dialog" aria-modal="true"/);
+assert.match(app, /class="quick-entry-overlay cost-exchange-overlay" role="dialog" aria-modal="true"/);
 assert.match(app, /const formButtons = Array\.from\(form\.querySelectorAll\("button"\)\);[\s\S]*formButtons\.forEach\(\(button\) => \{ button\.disabled = true; \}\);/);
 assert.match(app, /action === "close-quick-entry"[\s\S]*quickEntrySubmitPending[\s\S]*交易處理中，請稍候/);
 assert.match(app, /event\.key === "Escape"[\s\S]*quickEntrySubmitPending[\s\S]*交易處理中，請稍候/);

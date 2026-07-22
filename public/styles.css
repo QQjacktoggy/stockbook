@@ -833,6 +833,135 @@ canvas {
   }
 }
 
+/* Inventory cost exchange */
+.quick-entry-sheet.cost-exchange-sheet {
+  width: min(860px, calc(100vw - 32px));
+}
+
+.cost-exchange-grid {
+  align-content: start;
+}
+
+.cost-exchange-notice,
+.cost-exchange-source-summary {
+  display: grid;
+  gap: 5px;
+  padding: 14px 16px;
+  border: 1px solid rgba(14, 116, 104, 0.2);
+  border-radius: 16px;
+  background: rgba(236, 253, 245, 0.78);
+}
+
+.cost-exchange-notice span,
+.cost-exchange-source-summary span,
+.cost-exchange-source-summary small,
+.cost-exchange-preview > small {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.cost-exchange-target-section {
+  display: grid;
+  gap: 10px;
+}
+
+.cost-exchange-target-list {
+  display: grid;
+  gap: 10px;
+}
+
+.cost-exchange-target {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(130px, 0.42fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.cost-exchange-target.selected {
+  border-color: rgba(14, 116, 104, 0.48);
+  background: rgba(236, 253, 245, 0.7);
+}
+
+.cost-exchange-target.invalid {
+  border-color: rgba(220, 38, 38, 0.55);
+  background: rgba(254, 242, 242, 0.8);
+}
+
+.cost-exchange-target-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cost-exchange-target-check input {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+}
+
+.cost-exchange-target-check span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.cost-exchange-target-check strong,
+.cost-exchange-target-check small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cost-exchange-target-check small,
+.cost-exchange-target-after {
+  color: var(--muted);
+}
+
+.cost-exchange-reduction {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cost-exchange-reduction input {
+  min-width: 0;
+}
+
+.cost-exchange-target-after {
+  min-width: 92px;
+  text-align: right;
+}
+
+.cost-exchange-preview {
+  display: grid;
+  gap: 10px;
+}
+
+.cost-exchange-history .table-wrap {
+  margin-top: 4px;
+}
+
+@media (max-width: 760px) {
+  .quick-entry-sheet.cost-exchange-sheet {
+    width: min(100%, 560px);
+  }
+
+  .cost-exchange-target {
+    grid-template-columns: minmax(0, 1fr) minmax(108px, 0.45fr);
+  }
+
+  .cost-exchange-target-after {
+    grid-column: 1 / -1;
+    text-align: right;
+  }
+}
+
 
 @media (max-width: 1180px) {
   .metric-grid,

@@ -153,6 +153,7 @@ function initialState() {
     cashLedger: [],
     accountTransfers: [],
     positionTransfers: [],
+    inventoryCostExchanges: [],
     auditLogs: [],
     manualClosedRebuySellIds: [],
     borrowRebuyCycles: [],
@@ -179,6 +180,8 @@ function initialState() {
       reconciliationLimit: "40",
       inventoryFilterAccount: "ALL",
       inventoryFilterSymbol: "ALL",
+      inventoryCostExchangeOpen: false,
+      inventoryCostExchangeSourceBuyId: "",
       expandedMatchSellId: "",
       editingMatchSellId: "",
       quickActionSheetOpen: false,
@@ -534,7 +537,7 @@ function navigate(path) {
 }
 
 function render() {
-  document.body.classList.toggle("quick-entry-open", Boolean(state.ui.quickEntry?.type));
+  document.body.classList.toggle("quick-entry-open", Boolean(state.ui.quickEntry?.type || state.ui.inventoryCostExchangeOpen));
   const path = currentPath();
   if (isProtectedPath(path) && !currentUser()) {
     app.innerHTML = renderAuth("login");
@@ -828,12 +831,13 @@ function renderShell(path) {
       ${renderMobileQuickDock()}
       ${renderMobileBottomNav(path)}
       ${renderQuickEntryModal()}
+      ${renderInventoryCostExchangeModal()}
     </div>
   `;
 }
 
 function renderMobileQuickDock() {
-  if (state.ui.quickEntry?.type) return "";
+  if (state.ui.quickEntry?.type || state.ui.inventoryCostExchangeOpen) return "";
   const open = Boolean(state.ui.quickActionSheetOpen);
   const actions = [
     ["quick-buy", "買進", "買", "action-buy", "新增買進或回補"],
@@ -863,7 +867,7 @@ function renderMobileQuickDock() {
   `;
 }
 function renderMobileBottomNav(path) {
-  if (state.ui.quickEntry?.type) return "";
+  if (state.ui.quickEntry?.type || state.ui.inventoryCostExchangeOpen) return "";
   const items = [
     ["/app/inventory", "庫存", "▦"],
     ["/app/transactions", "交易", "⇄"],
@@ -916,6 +920,85 @@ function renderQuickEntryModal() {
           <button class="btn" type="button" data-action="close-quick-entry" ${busy ? "disabled" : ""}>取消</button>
           <button class="btn primary" type="submit" ${busy ? "disabled" : ""}>${isEdit ? "確認修改" : `儲存${escapeHtml(title)}`}</button>
         </div>
+      </form>
+    </div>
+  `;
+}
+
+function renderInventoryCostExchangeModal() {
+  if (!state.ui.inventoryCostExchangeOpen) return "";
+  const portfolioId = selectedPortfolioId();
+  const accountId = selectedBrokerAccountId(portfolioId);
+  const eligibleLots = inventoryCostExchangeEligibleLots(portfolioId, accountId);
+  const requestedSourceId = state.ui.inventoryCostExchangeSourceBuyId || "";
+  const sourceLot = eligibleLots.find((lot) => lot.buyTransactionId === requestedSourceId) || eligibleLots[0] || null;
+  const targetLots = sourceLot
+    ? eligibleLots.filter((lot) => lot.securityId === sourceLot.securityId && lot.buyTransactionId !== sourceLot.buyTransactionId)
+    : [];
+  const sourceShares = toNumber(sourceLot?.originalShares);
+  const sourcePrice = toNumber(sourceLot?.buyPrice);
+  return `
+    <div class="quick-entry-overlay cost-exchange-overlay" role="dialog" aria-modal="true" aria-label="庫存成本互換">
+      <form class="quick-entry-sheet cost-exchange-sheet" data-form="inventory-cost-exchange" data-source-shares="${escapeAttr(sourceShares)}" data-source-price="${escapeAttr(sourcePrice)}">
+        <header class="quick-entry-head">
+          <div><span>庫存管理</span><strong>成本互換</strong></div>
+          <button class="icon-btn" type="button" data-action="close-inventory-cost-exchange" aria-label="關閉">×</button>
+        </header>
+        ${sourceLot ? `
+          <div class="quick-entry-grid cost-exchange-grid">
+            <div class="cost-exchange-notice full">
+              <strong>只調整庫存帳面成本</strong>
+              <span>原始成交價、現金流與 0050 基準不會變動。目標庫存降低的成本，會等額加回換入的低價庫存。</span>
+            </div>
+            <div class="field full">
+              <label for="cost-exchange-source">被外部低價庫存換入的批次</label>
+              <select id="cost-exchange-source" name="sourceBuyTransactionId" required>
+                ${eligibleLots.map((lot) => `<option value="${escapeAttr(lot.buyTransactionId)}" ${lot.buyTransactionId === sourceLot.buyTransactionId ? "selected" : ""}>${escapeHtml(inventoryCostExchangeLotLabel(lot))}</option>`).join("")}
+              </select>
+            </div>
+            <div class="field"><label>換入日期</label><input type="date" name="exchangeDate" value="${today()}" required /></div>
+            <div class="field"><label>外部庫存成本／股</label><input type="number" step="0.01" min="0.01" inputmode="decimal" name="externalPrice" placeholder="例如 79" required /></div>
+            <div class="field full"><label>外部帳戶／備註</label><input name="externalAccountLabel" placeholder="例如：另一個券商帳戶" /></div>
+            <div class="cost-exchange-source-summary full">
+              <span>目前批次</span>
+              <strong>${escapeHtml(securityLabel(sourceLot.securityId))}・${fmtNum(sourceShares)} 股・目前成本 ${fmtPrice(sourcePrice)}</strong>
+              <small>${escapeHtml(accountName(sourceLot.brokerAccountId))}／${escapeHtml(sourceLot.buyDate)}</small>
+            </div>
+            <div class="full cost-exchange-target-section">
+              <div class="list-summary"><strong>選擇要拉低成本的庫存</strong><span>可不選；勾選後輸入每股要調降多少</span></div>
+              ${targetLots.length ? `<div class="cost-exchange-target-list">
+                ${targetLots.map((lot) => `
+                  <div class="cost-exchange-target" data-target-buy-id="${escapeAttr(lot.buyTransactionId)}" data-target-shares="${escapeAttr(lot.originalShares)}" data-target-price="${escapeAttr(lot.buyPrice)}">
+                    <label class="cost-exchange-target-check">
+                      <input type="checkbox" name="target__${escapeAttr(lot.buyTransactionId)}" value="1" />
+                      <span><strong>${escapeHtml(inventoryCostExchangeLotLabel(lot))}</strong><small>目前 ${fmtPrice(lot.buyPrice)}／股</small></span>
+                    </label>
+                    <label class="cost-exchange-reduction">每股調降<input type="number" step="0.01" min="0" inputmode="decimal" name="reduction__${escapeAttr(lot.buyTransactionId)}" value="0" /></label>
+                    <small class="cost-exchange-target-after" data-target-after>調整後 ${fmtPrice(lot.buyPrice)}</small>
+                  </div>
+                `).join("")}
+              </div>` : `<div class="empty-state compact">同帳戶沒有其他可調整的 ${escapeHtml(securityLabel(sourceLot.securityId))} 完整庫存批次。</div>`}
+            </div>
+            <div class="quick-trade-preview full cost-exchange-preview" data-cost-exchange-preview>
+              <div class="quick-preview-title"><strong>互換前預覽</strong><span>輸入外部成本後自動驗算</span></div>
+              <div class="quick-preview-grid">
+                <div><span>換入批次最終成本</span><strong data-source-final-price>-</strong></div>
+                <div><span>分配調降總額</span><strong data-redistributed-amount>$0</strong></div>
+                <div><span>本帳本成本變動</span><strong data-ledger-cost-change>-</strong></div>
+                <div><span>守恆檢查</span><strong data-conservation-status>等待輸入</strong></div>
+              </div>
+              <small data-cost-exchange-explain>外部換入造成的成本差額會保留；內部分配部分必須加減相抵。</small>
+            </div>
+            <div class="quick-entry-error full" data-cost-exchange-error role="alert" tabindex="-1" hidden></div>
+          </div>
+          <div class="quick-entry-actions">
+            <button class="btn" type="button" data-action="close-inventory-cost-exchange">取消</button>
+            <button class="btn primary" type="submit">儲存成本互換</button>
+          </div>
+        ` : `
+          <div class="quick-entry-grid"><div class="empty-state full">目前帳戶沒有可換價的完整未售出庫存。已部分賣出或借券中的批次不開放調整。</div></div>
+          <div class="quick-entry-actions"><button class="btn primary" type="button" data-action="close-inventory-cost-exchange">關閉</button></div>
+        `}
       </form>
     </div>
   `;
@@ -1204,6 +1287,7 @@ function sellInventoryLotOptions(lots, accountId, symbol, tradeDate = today()) {
     .filter((lot) => !portfolioId || lot.portfolioId === portfolioId)
     .filter((lot) => !accountId || lot.brokerAccountId === accountId)
     .filter((lot) => !cutoffDate || lot.buyDate <= cutoffDate)
+    .filter((lot) => inventoryCostExchangeAllowsTradeDate(lot, cutoffDate))
     .filter((lot) => securityById(lot.securityId)?.symbol.toUpperCase() === cleanSymbol)
     .sort(sortByBuyDateDesc)
     .map(lotMatchOption);
@@ -1349,6 +1433,7 @@ function validateBorrowSellSourceLots(sourceValue, shares, account, securityId, 
     if (lot.brokerAccountId !== account.id) throw new Error("選取的借券來源庫存屬於不同券商帳戶。");
     if (lot.securityId !== securityId) throw new Error("選取的借券來源庫存和賣出股票不同。");
     if (lot.buyDate > parseDate(tradeDate)) throw new Error("借券來源庫存的買進日期不可晚於賣出日期。");
+    if (!inventoryCostExchangeAllowsTradeDate(lot, tradeDate)) throw new Error("這批庫存的賣出日期不可早於成本互換日期。");
     const available = Math.max(0, toNumber(lot.remainingShares) - toNumber(reservations.get(primaryId)));
     lots.push({ lot, available });
   }
@@ -2419,6 +2504,7 @@ function renderInventory() {
     <section class="section">
       <div class="section-title">
         <div><h2>目前庫存</h2><p>依帳戶顯示目前持股</p></div>
+        <button class="btn blue" type="button" data-action="open-inventory-cost-exchange">成本互換</button>
       </div>
       <div class="filters mobile-filter-panel">
 
@@ -2471,6 +2557,7 @@ function renderInventory() {
         "尚無買進 lot"
       )}
     </section>
+    ${renderInventoryCostExchangeHistory()}
   `;
 }
 
@@ -2527,9 +2614,39 @@ function renderInventoryLotActions(lot) {
   return `
     <div class="btn-row lot-actions">
       <button class="btn warn" data-action="sell-lot" data-buy-id="${escapeAttr(lot.buyTransactionId)}">賣出</button>
+      ${inventoryCostExchangeLotIsEligible(lot) ? `<button class="btn blue" data-action="open-inventory-cost-exchange" data-source-buy-id="${escapeAttr(lot.buyTransactionId)}">換價</button>` : ""}
       <button class="btn" data-action="edit-transaction" data-id="${escapeAttr(lot.buyTransactionId)}">編輯</button>
       <button class="btn danger" data-action="delete-transaction" data-id="${escapeAttr(lot.buyTransactionId)}">刪除買進</button>
     </div>
+  `;
+}
+
+function renderInventoryCostExchangeHistory() {
+  const portfolioId = selectedPortfolioId();
+  const accountId = selectedBrokerAccountId(portfolioId);
+  const rows = (state.inventoryCostExchanges || [])
+    .filter((item) => item.portfolioId === portfolioId && (!accountId || item.brokerAccountId === accountId))
+    .sort((a, b) => String(b.exchangeDate || b.createdAt || "").localeCompare(String(a.exchangeDate || a.createdAt || "")));
+  if (!rows.length) return "";
+  return `
+    <section class="section cost-exchange-history">
+      <div class="section-title"><div><h2>成本互換紀錄</h2><p>保留外部換入與內部分配的完整稽核軌跡</p></div></div>
+      ${renderTable(
+        [["date", "日期"], ["security", "股票"], ["source", "換入批次"], ["external", "外部成本"], ["final", "換入後最終成本"], ["distributed", "分配調降"], ["targets", "調整批次"], ["note", "外部帳戶／備註"], ["actions", "操作"]],
+        rows.map((item) => ({
+          date: escapeHtml(item.exchangeDate || "-"),
+          security: escapeHtml(securityLabel(item.securityId)),
+          source: escapeHtml(inventoryCostExchangeTransactionLabel(item.sourceBuyTransactionId)),
+          external: fmtPrice(item.externalPrice),
+          final: fmtPrice(item.sourceFinalPrice),
+          distributed: fmtMoney(item.redistributedAmount || 0),
+          targets: escapeHtml(`${(item.targetAdjustments || []).length} 個批次`),
+          note: escapeHtml(item.externalAccountLabel || "-"),
+          actions: `<button class="btn danger" type="button" data-action="delete-inventory-cost-exchange" data-id="${escapeAttr(item.id)}">撤銷</button>`
+        })),
+        "尚無成本互換紀錄"
+      )}
+    </section>
   `;
 }
 function renderInventoryAccountBreakdown(accounts) {
@@ -2650,6 +2767,111 @@ function remainingCostBasis(lot) {
   const originalShares = Math.max(toNumber(lot.originalShares), 1);
   const basis = toNumber(lot.costBasisNet || lot.costBasisGross || lot.buyPrice * lot.originalShares);
   return roundMoney(basis * (toNumber(lot.remainingShares) / originalShares));
+}
+
+function inventoryCostAdjustmentForBuy(buyTransactionId) {
+  return (state.inventoryCostExchanges || []).reduce((total, exchange) => {
+    const adjustment = (exchange.lotAdjustments || []).find((item) => item.buyTransactionId === buyTransactionId);
+    return total + toNumber(adjustment?.costDelta);
+  }, 0);
+}
+
+function inventoryCostExchangeLotIsEligible(lot) {
+  if (!lot || toNumber(lot.originalShares) <= 0) return false;
+  const rawRemaining = toNumber(lot.rawRemainingShares ?? lot.remainingShares);
+  return rawRemaining === toNumber(lot.originalShares) && toNumber(lot.borrowedShares) <= 0 && toNumber(lot.remainingShares) > 0;
+}
+
+function inventoryCostExchangeEligibleLots(portfolioId = selectedPortfolioId(), accountId = selectedBrokerAccountId(portfolioId)) {
+  return borrowAdjustedInventoryLots(state.buyLots)
+    .filter((lot) => lot.portfolioId === portfolioId && (!accountId || lot.brokerAccountId === accountId) && inventoryCostExchangeLotIsEligible(lot))
+    .sort((a, b) => String(a.buyDate || "").localeCompare(String(b.buyDate || "")) || toNumber(b.buyPrice) - toNumber(a.buyPrice));
+}
+
+function inventoryCostExchangeLotLabel(lot) {
+  return `${securityLabel(lot.securityId)}｜${lot.buyDate}｜${fmtNum(lot.originalShares)}股 @ ${fmtPrice(lot.buyPrice)}`;
+}
+
+function inventoryCostExchangeTransactionLabel(buyTransactionId) {
+  const lot = state.buyLots.find((item) => item.buyTransactionId === buyTransactionId);
+  if (lot) return inventoryCostExchangeLotLabel(lot);
+  const tx = state.appTransactions.find((item) => item.id === buyTransactionId);
+  return tx ? `${securityLabel(tx.securityId)}｜${tx.tradeDate}｜${fmtNum(tx.shares)}股` : "來源已移除";
+}
+
+function inventoryCostExchangeEarliestDateForBuy(buyTransactionId) {
+  return (state.inventoryCostExchanges || [])
+    .filter((exchange) => (exchange.lotAdjustments || []).some((item) => item.buyTransactionId === buyTransactionId))
+    .map((exchange) => parseDate(exchange.exchangeDate || exchange.createdAt || ""))
+    .filter(Boolean)
+    .sort()[0] || "";
+}
+
+function inventoryCostExchangeAllowsTradeDate(lot, tradeDate) {
+  const exchangeDate = inventoryCostExchangeEarliestDateForBuy(lot?.buyTransactionId);
+  return !exchangeDate || !tradeDate || parseDate(tradeDate) >= exchangeDate;
+}
+
+function calculateInventoryCostExchangePlan(sourceLot, externalPriceInput, targetSelections = []) {
+  const externalPrice = toNumber(externalPriceInput);
+  const sourceShares = toNumber(sourceLot?.originalShares);
+  const sourceCurrentPrice = toNumber(sourceLot?.buyPrice);
+  if (!sourceLot || sourceShares <= 0) throw new Error("換入來源股數無效。");
+  if (externalPrice <= 0) throw new Error("外部庫存成本必須大於 0。");
+  const targetAdjustments = [];
+  let redistributedAmount = 0;
+  for (const selection of targetSelections) {
+    const targetLot = selection.lot;
+    const reductionPerShare = toNumber(selection.reductionPerShare);
+    if (!targetLot || targetLot.buyTransactionId === sourceLot.buyTransactionId) throw new Error("選取的調降庫存已不符合調整資格。");
+    if (targetLot.securityId !== sourceLot.securityId) throw new Error("只能在同一檔股票的庫存批次間分配成本。");
+    if (reductionPerShare <= 0) throw new Error("勾選的庫存必須輸入大於 0 的每股調降金額。");
+    const beforePrice = toNumber(targetLot.buyPrice);
+    const afterPrice = roundMoney(beforePrice - reductionPerShare);
+    if (afterPrice <= 0) throw new Error(`${inventoryCostExchangeLotLabel(targetLot)} 調整後成本必須大於 0。`);
+    const shares = toNumber(targetLot.originalShares);
+    const costDelta = -roundMoney(reductionPerShare * shares);
+    redistributedAmount += Math.abs(costDelta);
+    targetAdjustments.push({
+      buyTransactionId: targetLot.buyTransactionId,
+      brokerAccountId: targetLot.brokerAccountId,
+      shares,
+      beforePrice,
+      reductionPerShare,
+      afterPrice,
+      costDelta
+    });
+  }
+  redistributedAmount = roundMoney(redistributedAmount);
+  const externalSwapCostDelta = roundMoney((externalPrice - sourceCurrentPrice) * sourceShares);
+  const sourceCostDelta = roundMoney(externalSwapCostDelta + redistributedAmount);
+  const sourceFinalPrice = roundMoney(sourceCurrentPrice + sourceCostDelta / sourceShares);
+  if (sourceFinalPrice <= 0) throw new Error("換入批次調整後成本必須大於 0。");
+  const lotAdjustments = [
+    {
+      role: "SOURCE",
+      buyTransactionId: sourceLot.buyTransactionId,
+      brokerAccountId: sourceLot.brokerAccountId,
+      shares: sourceShares,
+      beforePrice: sourceCurrentPrice,
+      afterPrice: sourceFinalPrice,
+      costDelta: sourceCostDelta
+    },
+    ...targetAdjustments.map((item) => ({ role: "TARGET", ...item }))
+  ];
+  const internalAllocationNet = roundMoney(lotAdjustments.reduce((total, item) => total + toNumber(item.costDelta), 0) - externalSwapCostDelta);
+  if (Math.abs(internalAllocationNet) > 1) throw new Error("成本互換驗算失敗，內部分配沒有守恆。");
+  return {
+    externalPrice,
+    sourceShares,
+    sourceCurrentPrice,
+    sourceFinalPrice,
+    externalSwapCostDelta,
+    redistributedAmount,
+    targetAdjustments,
+    lotAdjustments,
+    internalAllocationNet
+  };
 }
 
 function quoteRecordIdFor(portfolioId, securityId) {
@@ -3337,6 +3559,27 @@ async function onSubmit(event) {
     }
     return;
   }
+  if (name === "inventory-cost-exchange") {
+    const errorBox = form.querySelector("[data-cost-exchange-error]");
+    if (errorBox) {
+      errorBox.hidden = true;
+      errorBox.textContent = "";
+    }
+    try {
+      handleInventoryCostExchange(data, form);
+    } catch (error) {
+      console.warn(error?.message || error);
+      if (errorBox?.isConnected) {
+        errorBox.textContent = formatFirebaseError(error);
+        errorBox.hidden = false;
+        errorBox.focus();
+        errorBox.scrollIntoView({ block: "nearest" });
+      } else {
+        showToast(formatFirebaseError(error));
+      }
+    }
+    return;
+  }
   try {
     if (name === "register") return handleRegister(data);
     if (name === "login") return handleLogin(data);
@@ -3383,6 +3626,9 @@ async function onClick(event) {
     if (action === "quick-deposit") return openQuickEntry("DEPOSIT");
     if (action === "quick-income") return openQuickEntry("INTEREST");
     if (action === "quick-withdraw") return openQuickEntry("WITHDRAW");
+    if (action === "open-inventory-cost-exchange") return openInventoryCostExchange(actionButton.dataset.sourceBuyId || "");
+    if (action === "close-inventory-cost-exchange") return closeInventoryCostExchange();
+    if (action === "delete-inventory-cost-exchange") return handleDeleteInventoryCostExchange(actionButton.dataset.id);
     if (action === "close-quick-entry") {
       if (quickEntrySubmitPending) return showToast("交易處理中，請稍候。");
       return closeQuickEntry();
@@ -3534,12 +3780,87 @@ function handleSelectReportAccount(accountId) {
   render();
 }
 
+function openInventoryCostExchange(sourceBuyTransactionId = "") {
+  state.ui.inventoryCostExchangeOpen = true;
+  state.ui.inventoryCostExchangeSourceBuyId = sourceBuyTransactionId || "";
+  state.ui.quickActionSheetOpen = false;
+  state.ui.accountSheetOpen = false;
+  persist();
+  render();
+  window.setTimeout(() => document.querySelector('form[data-form="inventory-cost-exchange"] [name="externalPrice"]')?.focus(), 0);
+}
+
+function closeInventoryCostExchange() {
+  state.ui.inventoryCostExchangeOpen = false;
+  state.ui.inventoryCostExchangeSourceBuyId = "";
+  persist();
+  render();
+}
+
+function updateInventoryCostExchangePreview(form) {
+  if (!form) return;
+  const sourceShares = toNumber(form.dataset.sourceShares);
+  const sourcePrice = toNumber(form.dataset.sourcePrice);
+  const externalPrice = toNumber(form.elements.externalPrice?.value);
+  let redistributedAmount = 0;
+  let invalidTarget = "";
+  for (const row of form.querySelectorAll("[data-target-buy-id]")) {
+    const checkbox = row.querySelector('input[type="checkbox"]');
+    const reductionInput = row.querySelector('input[type="number"]');
+    const reduction = checkbox?.checked ? toNumber(reductionInput?.value) : 0;
+    const shares = toNumber(row.dataset.targetShares);
+    const price = toNumber(row.dataset.targetPrice);
+    const afterPrice = roundMoney(price - reduction);
+    const afterNode = row.querySelector("[data-target-after]");
+    if (afterNode) afterNode.textContent = `調整後 ${fmtPrice(afterPrice)}`;
+    row.classList.toggle("selected", Boolean(checkbox?.checked));
+    row.classList.toggle("invalid", Boolean(checkbox?.checked && (reduction <= 0 || afterPrice <= 0)));
+    if (checkbox?.checked && reduction <= 0) invalidTarget = "勾選的庫存必須輸入大於 0 的每股調降金額。";
+    if (checkbox?.checked && afterPrice <= 0) invalidTarget = "調降後的庫存成本必須大於 0。";
+    redistributedAmount += roundMoney(reduction * shares);
+  }
+  const sourceFinalPrice = sourceShares > 0 && externalPrice > 0
+    ? roundMoney(externalPrice + redistributedAmount / sourceShares)
+    : 0;
+  const ledgerCostChange = sourceShares > 0 && externalPrice > 0
+    ? roundMoney((externalPrice - sourcePrice) * sourceShares)
+    : 0;
+  const sourceFinalNode = form.querySelector("[data-source-final-price]");
+  const redistributedNode = form.querySelector("[data-redistributed-amount]");
+  const ledgerChangeNode = form.querySelector("[data-ledger-cost-change]");
+  const conservationNode = form.querySelector("[data-conservation-status]");
+  const explainNode = form.querySelector("[data-cost-exchange-explain]");
+  if (sourceFinalNode) sourceFinalNode.textContent = externalPrice > 0 ? `${fmtPrice(sourceFinalPrice)}／股` : "-";
+  if (redistributedNode) redistributedNode.textContent = fmtMoney(redistributedAmount);
+  if (ledgerChangeNode) ledgerChangeNode.textContent = externalPrice > 0 ? `${ledgerCostChange >= 0 ? "+" : ""}${fmtMoney(ledgerCostChange)}` : "-";
+  if (conservationNode) {
+    conservationNode.textContent = invalidTarget ? "輸入有誤" : externalPrice > 0 ? "內部分配已守恆" : "等待輸入";
+    conservationNode.className = invalidTarget ? "negative" : externalPrice > 0 ? "positive" : "";
+  }
+  if (explainNode) explainNode.textContent = externalPrice > 0
+    ? `外部換入使本帳本成本${ledgerCostChange >= 0 ? "增加" : "減少"} ${fmtMoney(Math.abs(ledgerCostChange))}；另有 ${fmtMoney(redistributedAmount)} 從目標批次等額移回換入批次。`
+    : "外部換入造成的成本差額會保留；內部分配部分必須加減相抵。";
+}
+
 function onInput(event) {
-  const form = event.target.closest('form[data-form="quick-entry"]');
-  if (form) updateQuickTradePreview(form);
+  const quickForm = event.target.closest('form[data-form="quick-entry"]');
+  if (quickForm) updateQuickTradePreview(quickForm);
+  const costExchangeForm = event.target.closest('form[data-form="inventory-cost-exchange"]');
+  if (costExchangeForm) updateInventoryCostExchangePreview(costExchangeForm);
 }
 
 function onChange(event) {
+  const costExchangeForm = event.target.closest('form[data-form="inventory-cost-exchange"]');
+  if (costExchangeForm) {
+    if (event.target.name === "sourceBuyTransactionId") {
+      state.ui.inventoryCostExchangeSourceBuyId = event.target.value;
+      persist();
+      render();
+      window.setTimeout(() => document.querySelector('form[data-form="inventory-cost-exchange"] [name="externalPrice"]')?.focus(), 0);
+      return;
+    }
+    updateInventoryCostExchangePreview(costExchangeForm);
+  }
   if (event.target.name === "sourceType" && event.target.closest('form[data-form="import-file"]')) {
     const form = event.target.closest('form[data-form="import-file"]');
     const symbolFields = form.querySelectorAll('[name="symbol"], [name="securityName"]');
@@ -3662,6 +3983,10 @@ function onKeydown(event) {
   if (quickEntryDialog) {
     if (event.key === "Escape") {
       event.preventDefault();
+      if (quickEntryDialog.classList.contains("cost-exchange-overlay")) {
+        closeInventoryCostExchange();
+        return;
+      }
       if (quickEntrySubmitPending) {
         showToast("交易處理中，請稍候。");
         return;
@@ -4880,6 +5205,73 @@ function handlePositionTransfer(data) {
   commit("股票轉戶已新增");
 }
 
+function handleInventoryCostExchange(data, form) {
+  const portfolioId = selectedPortfolioId();
+  const accountId = selectedBrokerAccountId(portfolioId);
+  const eligibleLots = inventoryCostExchangeEligibleLots(portfolioId, accountId);
+  const sourceLot = eligibleLots.find((lot) => lot.buyTransactionId === data.sourceBuyTransactionId);
+  if (!sourceLot) throw new Error("換入來源必須是目前帳戶中完整未售出、未借券的庫存批次。");
+  const submitted = Object.fromEntries(new FormData(form).entries());
+  const targetSelections = [];
+  for (const key of Object.keys(submitted).filter((item) => item.startsWith("target__"))) {
+    const buyTransactionId = key.slice("target__".length);
+    const targetLot = eligibleLots.find((lot) => lot.buyTransactionId === buyTransactionId);
+    if (!targetLot || targetLot.buyTransactionId === sourceLot.buyTransactionId) throw new Error("選取的調降庫存已不符合調整資格。");
+    targetSelections.push({ lot: targetLot, reductionPerShare: submitted[`reduction__${buyTransactionId}`] });
+  }
+  const plan = calculateInventoryCostExchangePlan(sourceLot, data.externalPrice, targetSelections);
+  const exchangeDate = parseDate(data.exchangeDate || today());
+  const latestBuyDate = [sourceLot, ...targetSelections.map((item) => item.lot)]
+    .map((lot) => lot.buyDate)
+    .filter(Boolean)
+    .sort()
+    .at(-1) || "";
+  if (exchangeDate < latestBuyDate) throw new Error("成本互換日期不可早於任何受影響庫存的買進日期。");
+  if (exchangeDate > today()) throw new Error("成本互換日期不可晚於今天。");
+
+  const exchange = {
+    id: makeId("cost-exchange"),
+    userId: currentUser()?.id || "",
+    portfolioId,
+    brokerAccountId: sourceLot.brokerAccountId,
+    securityId: sourceLot.securityId,
+    sourceBuyTransactionId: sourceLot.buyTransactionId,
+    exchangeDate,
+    sourceShares: plan.sourceShares,
+    sourceOriginalPrice: plan.sourceCurrentPrice,
+    externalPrice: plan.externalPrice,
+    sourceFinalPrice: plan.sourceFinalPrice,
+    externalSwapCostDelta: plan.externalSwapCostDelta,
+    redistributedAmount: plan.redistributedAmount,
+    targetAdjustments: plan.targetAdjustments,
+    lotAdjustments: plan.lotAdjustments,
+    externalAccountLabel: String(data.externalAccountLabel || "").trim(),
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  };
+  state.inventoryCostExchanges.push(exchange);
+  state.ui.inventoryCostExchangeOpen = false;
+  state.ui.inventoryCostExchangeSourceBuyId = "";
+  auditLog("CREATE", "inventory_cost_exchange", exchange.id, null, exchange, portfolioId);
+  commit(`成本互換已儲存；${fmtMoney(plan.redistributedAmount)} 已等額回加換入批次`);
+}
+
+function handleDeleteInventoryCostExchange(id) {
+  const exchange = (state.inventoryCostExchanges || []).find((item) => item.id === id && item.portfolioId === selectedPortfolioId());
+  if (!exchange) return;
+  const adjustedLots = borrowAdjustedInventoryLots(state.buyLots);
+  const affectedIds = new Set((exchange.lotAdjustments || []).map((item) => item.buyTransactionId));
+  const affectedLots = adjustedLots.filter((lot) => affectedIds.has(lot.buyTransactionId));
+  if (affectedLots.length !== affectedIds.size || affectedLots.some((lot) => !inventoryCostExchangeLotIsEligible(lot))) {
+    throw new Error("這筆互換涉及的庫存已有賣出或借券，為保護歷史損益不能撤銷。");
+  }
+  const label = `${exchange.exchangeDate} ${securityLabel(exchange.securityId)} ${fmtNum(exchange.sourceShares)}股`;
+  if (!confirmDangerousDelete(label, "這會撤銷外部換入與所有對應的成本分配，但不會刪除原始買進交易。")) return;
+  state.inventoryCostExchanges = state.inventoryCostExchanges.filter((item) => item.id !== id);
+  auditLog("DELETE", "inventory_cost_exchange", id, exchange, null, exchange.portfolioId);
+  commit("成本互換已撤銷並重算庫存");
+}
+
 function handleSecurityCreate(data) {
   const symbol = String(data.symbol || "").trim().toUpperCase();
   if (!symbol) throw new Error("請輸入股票代號");
@@ -5032,13 +5424,20 @@ function handleSaveMatch(sellId) {
 function handleDeleteTransaction(id) {
   const tx = state.appTransactions.find((item) => item.id === id);
   if (!tx) return;
+  const relatedCostExchanges = (state.inventoryCostExchanges || []).filter((exchange) =>
+    (exchange.lotAdjustments || []).some((item) => item.buyTransactionId === id)
+  );
   const label = `${tx.tradeDate} ${tx.transactionType} ${securityLabel(tx.securityId)} ${fmtNum(tx.shares)}股`;
-  const impact = "這會刪除這筆交易並重算庫存、配對、回補與對帳。";
+  const impact = `這會刪除這筆交易並重算庫存、配對、回補與對帳。${relatedCostExchanges.length ? `同時撤銷 ${relatedCostExchanges.length} 筆相關成本互換。` : ""}`;
   const ok = ["DEPOSIT", "WITHDRAW", "INTEREST", "DIVIDEND"].includes(tx.transactionType)
     ? confirmCashTransactionDelete(tx, impact)
     : confirmDangerousDelete(label, impact);
   if (!ok) return;
   state.appTransactions = state.appTransactions.filter((item) => item.id !== id);
+  if (relatedCostExchanges.length) {
+    const relatedIds = new Set(relatedCostExchanges.map((item) => item.id));
+    state.inventoryCostExchanges = state.inventoryCostExchanges.filter((item) => !relatedIds.has(item.id));
+  }
   auditLog("DELETE", "app_transaction", id, tx, null, tx.portfolioId);
   commit("交易已刪除");
 }
@@ -5131,6 +5530,7 @@ function handleDeletePortfolio(id) {
   state.cashLedger = state.cashLedger.filter((item) => item.portfolioId !== id);
   state.accountTransfers = state.accountTransfers.filter((item) => item.portfolioId !== id);
   state.positionTransfers = state.positionTransfers.filter((item) => item.portfolioId !== id);
+  state.inventoryCostExchanges = state.inventoryCostExchanges.filter((item) => item.portfolioId !== id);
   state.marketQuotes = state.marketQuotes.filter((item) => item.portfolioId !== id);
   state.manualClosedRebuySellIds = state.manualClosedRebuySellIds.filter((item) => !txIds.has(item));
   delete state.settings.portfolios[id];
@@ -5334,6 +5734,7 @@ function cascadeDeleteBrokerAccount(account) {
   state.reconciliationLinks = state.reconciliationLinks.filter((item) => item.brokerAccountId !== account.id);
   state.accountTransfers = state.accountTransfers.filter((item) => item.fromBrokerAccountId !== account.id && item.toBrokerAccountId !== account.id);
   state.positionTransfers = state.positionTransfers.filter((item) => item.fromBrokerAccountId !== account.id && item.toBrokerAccountId !== account.id);
+  state.inventoryCostExchanges = state.inventoryCostExchanges.filter((item) => item.brokerAccountId !== account.id);
   state.manualClosedRebuySellIds = state.manualClosedRebuySellIds.filter((item) => !txIds.has(item));
 }
 function handleManualCloseRebuy(sellId) {
@@ -5762,6 +6163,10 @@ function recomputeLotsMatchesAndRebuy() {
     .sort(sortByDateAsc);
   for (const buy of buyTransactions) {
     const buyAmounts = effectiveTransactionAmounts(buy);
+    const manualCostAdjustment = inventoryCostAdjustmentForBuy(buy.id);
+    const adjustedBuyPrice = toNumber(buy.shares) > 0
+      ? roundMoney(toNumber(buy.price) + manualCostAdjustment / toNumber(buy.shares))
+      : toNumber(buy.price);
     const lot = {
       id: makeId("lot"),
       userId: buy.userId,
@@ -5772,12 +6177,13 @@ function recomputeLotsMatchesAndRebuy() {
       buyTransactionId: buy.id,
       sourceTransactionId: buy.sourceTransactionId || buy.id,
       buyDate: buy.tradeDate,
-      buyPrice: buy.price,
+      buyPrice: adjustedBuyPrice,
       originalShares: buy.shares,
       remainingShares: buy.shares,
       allocatedBuyFee: buyAmounts.fee,
-      costBasisGross: buyAmounts.grossAmount,
-      costBasisNet: Math.abs(buyAmounts.netAmount),
+      costBasisGross: roundMoney(toNumber(buyAmounts.grossAmount) + manualCostAdjustment),
+      costBasisNet: roundMoney(Math.abs(toNumber(buyAmounts.netAmount)) + manualCostAdjustment),
+      manualCostAdjustment,
       strategyCategory: buy.strategyCategory,
       status: "OPEN",
       createdAt: buy.createdAt,
@@ -6492,7 +6898,7 @@ async function decompressText(base64) {
 
 function ledgerContentScore(data) {
   if (!data || typeof data !== "object") return 0;
-  const keys = ["portfolios", "brokerAccounts", "importBatches", "rawImportRows", "appTransactions", "brokerExecutions", "accountTransfers", "positionTransfers", "marketQuotes", "auditLogs", "manualClosedRebuySellIds"];
+  const keys = ["portfolios", "brokerAccounts", "importBatches", "rawImportRows", "appTransactions", "brokerExecutions", "accountTransfers", "positionTransfers", "inventoryCostExchanges", "marketQuotes", "auditLogs", "manualClosedRebuySellIds"];
   return keys.reduce((total, key) => total + (Array.isArray(data[key]) ? data[key].length : 0), 0) + Object.keys(data.acceptedBrokerDiffs || {}).length;
 }
 
@@ -6738,6 +7144,7 @@ function exportCurrentUserState() {
     ...state.appTransactions.filter((tx) => portfolioIds.has(tx.portfolioId)).map((tx) => tx.securityId),
     ...state.brokerExecutions.filter((execution) => portfolioIds.has(execution.portfolioId)).map((execution) => execution.securityId),
     ...state.positionTransfers.filter((transfer) => portfolioIds.has(transfer.portfolioId)).map((transfer) => transfer.securityId),
+    ...state.inventoryCostExchanges.filter((exchange) => portfolioIds.has(exchange.portfolioId)).map((exchange) => exchange.securityId),
     ...state.marketQuotes.filter((quote) => portfolioIds.has(quote.portfolioId)).map((quote) => quote.securityId)
   ]);
   return {
@@ -6753,6 +7160,7 @@ function exportCurrentUserState() {
     brokerExecutions: state.brokerExecutions.filter((item) => portfolioIds.has(item.portfolioId)),
     accountTransfers: state.accountTransfers.filter((item) => portfolioIds.has(item.portfolioId)),
     positionTransfers: state.positionTransfers.filter((item) => portfolioIds.has(item.portfolioId)),
+    inventoryCostExchanges: state.inventoryCostExchanges.filter((item) => portfolioIds.has(item.portfolioId)),
     marketQuotes: state.marketQuotes.filter((item) => portfolioIds.has(item.portfolioId)),
     auditLogs: state.auditLogs.filter((item) => !item.portfolioId || portfolioIds.has(item.portfolioId)),
     settings: state.settings,
@@ -6778,6 +7186,7 @@ function mergeCurrentUserState(remote) {
     "brokerExecutions",
     "accountTransfers",
     "positionTransfers",
+    "inventoryCostExchanges",
     "marketQuotes",
     "auditLogs"
   ]) {
@@ -6808,6 +7217,7 @@ function clearCurrentUserScopedState() {
   state.brokerExecutions = state.brokerExecutions.filter((item) => !portfolioIds.has(item.portfolioId));
   state.accountTransfers = state.accountTransfers.filter((item) => !portfolioIds.has(item.portfolioId));
   state.positionTransfers = state.positionTransfers.filter((item) => !portfolioIds.has(item.portfolioId));
+  state.inventoryCostExchanges = state.inventoryCostExchanges.filter((item) => !portfolioIds.has(item.portfolioId));
   state.marketQuotes = state.marketQuotes.filter((item) => !portfolioIds.has(item.portfolioId));
   state.cashAccounts = state.cashAccounts.filter((item) => !portfolioIds.has(item.portfolioId) && !accountIds.has(item.brokerAccountId));
   state.cashLedger = state.cashLedger.filter((item) => !portfolioIds.has(item.portfolioId));
@@ -6836,7 +7246,7 @@ function adoptRemoteStateForCurrentUser(remote) {
     if (record && ownerIds.has(record.userId)) record.userId = user.id;
   };
   copy.users = [{ ...user }];
-  for (const key of ["portfolios", "portfolioMembers", "brokerAccounts", "appTransactions", "brokerExecutions", "accountTransfers", "positionTransfers", "marketQuotes", "auditLogs"]) {
+  for (const key of ["portfolios", "portfolioMembers", "brokerAccounts", "appTransactions", "brokerExecutions", "accountTransfers", "positionTransfers", "inventoryCostExchanges", "marketQuotes", "auditLogs"]) {
     for (const record of copy[key] || []) remapUserId(record);
   }
   return copy;
