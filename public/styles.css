@@ -3332,6 +3332,7 @@ td {
   .action-cash .action-icon { background: var(--cash); }
   .action-income .action-icon { background: var(--profit); }
   .action-withdraw .action-icon { background: var(--warning); }
+  .action-cost .action-icon { background: var(--accent); }
 
   .quick-entry-overlay {
     align-items: end;

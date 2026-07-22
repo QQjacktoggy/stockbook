@@ -844,7 +844,8 @@ function renderMobileQuickDock() {
     ["quick-sell", "賣出", "賣", "action-sell", "從庫存賣出"],
     ["quick-deposit", "入金", "入", "action-cash", "現金入帳"],
     ["quick-income", "收益", "收", "action-income", "利息或股息"],
-    ["quick-withdraw", "出金", "出", "action-withdraw", "現金轉出"]
+    ["quick-withdraw", "出金", "出", "action-withdraw", "現金轉出"],
+    ["open-inventory-cost-exchange", "成本互換", "換", "action-cost", "調整庫存帳面成本"]
   ];
   return `
     <button class="mobile-fab ${open ? "active" : ""}" data-action="${open ? "close-action-sheet" : "open-action-sheet"}" aria-label="${open ? "關閉快速記帳" : "開啟快速記帳"}" aria-expanded="${open ? "true" : "false"}"><span aria-hidden="true">＋</span></button>
@@ -2504,7 +2505,6 @@ function renderInventory() {
     <section class="section">
       <div class="section-title">
         <div><h2>目前庫存</h2><p>依帳戶顯示目前持股</p></div>
-        <button class="btn blue" type="button" data-action="open-inventory-cost-exchange">成本互換</button>
       </div>
       <div class="filters mobile-filter-panel">
 
@@ -2614,7 +2614,6 @@ function renderInventoryLotActions(lot) {
   return `
     <div class="btn-row lot-actions">
       <button class="btn warn" data-action="sell-lot" data-buy-id="${escapeAttr(lot.buyTransactionId)}">賣出</button>
-      ${inventoryCostExchangeLotIsEligible(lot) ? `<button class="btn blue" data-action="open-inventory-cost-exchange" data-source-buy-id="${escapeAttr(lot.buyTransactionId)}">換價</button>` : ""}
       <button class="btn" data-action="edit-transaction" data-id="${escapeAttr(lot.buyTransactionId)}">編輯</button>
       <button class="btn danger" data-action="delete-transaction" data-id="${escapeAttr(lot.buyTransactionId)}">刪除買進</button>
     </div>

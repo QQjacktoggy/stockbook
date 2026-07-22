@@ -14,12 +14,16 @@ assert.match(app, /function renderMobileQuickDock\(\)[\s\S]*state\.ui\.quickEntr
 assert.match(app, /function renderMobileBottomNav\(path\)[\s\S]*state\.ui\.quickEntry\?\.type \|\| state\.ui\.inventoryCostExchangeOpen\) return "";/);
 assert.match(app, /role="dialog" aria-modal="true"/);
 assert.match(app, /class="quick-entry-overlay cost-exchange-overlay" role="dialog" aria-modal="true"/);
+assert.match(app, /const actions = \[[\s\S]*\["open-inventory-cost-exchange", "成本互換", "換", "action-cost"/);
+assert.doesNotMatch(app, /<button class="btn blue" type="button" data-action="open-inventory-cost-exchange">成本互換<\/button>/);
+assert.doesNotMatch(app, /data-source-buy-id=/);
 assert.match(app, /const formButtons = Array\.from\(form\.querySelectorAll\("button"\)\);[\s\S]*formButtons\.forEach\(\(button\) => \{ button\.disabled = true; \}\);/);
 assert.match(app, /action === "close-quick-entry"[\s\S]*quickEntrySubmitPending[\s\S]*交易處理中，請稍候/);
 assert.match(app, /event\.key === "Escape"[\s\S]*quickEntrySubmitPending[\s\S]*交易處理中，請稍候/);
 assert.match(css, /\.quick-entry-overlay\s*\{[\s\S]*?z-index:\s*100;/);
 assert.match(css, /\.quick-entry-sheet \[hidden\]\s*\{\s*display:\s*none\s*!important;/);
 assert.match(css, /body\.quick-entry-open\s*\{\s*overflow:\s*hidden;/);
+assert.match(css, /\.action-cost \.action-icon \{ background: var\(--accent\); \}/);
 assert.match(css, /max-height:\s*calc\(100dvh - 24px - env\(safe-area-inset-bottom\)\)/);
 assert.doesNotMatch(css, /quick-entry-overlay\s*\{[\s\S]{0,180}calc\(50px \+ env\(safe-area-inset-bottom\)\)/);
 console.log("quick entry mobile layout: PASS");
