@@ -107,6 +107,10 @@ const DEFAULT_TEMPLATE = {
 const app = document.querySelector("#app");
 const toast = document.querySelector("#toast");
 let state = loadState();
+if (repairBrokerExecutionSecurityIds()) {
+  runReconciliation();
+  persist();
+}
 let firebaseRuntime = null;
 let firebaseAutoSyncTimer = null;
 let firebaseAutoSyncInFlight = false;
@@ -494,26 +498,43 @@ function securityTaxRate(security, feeSetting) {
     : toNumber(feeSetting.stockSellTaxRate ?? feeSetting.sellTaxRate ?? 0.003);
 }
 function inferSymbol(name) {
-  const text = String(name || "").toUpperCase();
-  
-  const codeMatch = text.match(/\b\d{4,6}\b/) || text.match(/\d{4,6}/);
-  if (codeMatch) return codeMatch[0];
-  
+  const rawName = String(name || "").trim();
+  const text = rawName.toUpperCase();
+  const normalizedName = rawName.replace(/[\s　]/g, "").toUpperCase();
+
+  // These CSVs do not include a stock-code column, so use full-name aliases.
+  // Exact matching prevents 「元大台灣50正2」 from being classified as 0050.
+  const knownNames = {
+    "元大台灣50正2": "00631L",
+    "元大台灣50": "0050",
+    "台灣50": "0050",
+    "台積電": "2330",
+    "元大高股息": "0056",
+    "元大美債20年": "00679B",
+    "國泰永續高股息": "00878",
+    "群益台灣精選高息": "00919",
+    "大華優利高填息30": "00918",
+    "群益ESG投等債20+": "00937B",
+    "緯穎": "6669",
+    "0050": "0050",
+    "006208": "006208",
+    "0056": "0056"
+  };
+  if (knownNames[normalizedName]) return knownNames[normalizedName];
+
   if (typeof state !== "undefined" && state.securities) {
-    const found = state.securities.find((s) => s.name === name || name.includes(s.name) || s.name.includes(name));
+    const found = state.securities.find((security) => {
+      const securityName = String(security.name || "").replace(/[\s　]/g, "").toUpperCase();
+      return securityName && securityName === normalizedName;
+    });
     if (found) return found.symbol;
   }
 
-  const known = [
-    ["006208", "006208"],
-    ["0056", "0056"],
-    ["台灣50", "0050"],
-    ["元大台灣50", "0050"],
-    ["0050", "0050"]
-  ];
-  for (const [needle, symbol] of known) {
-    if (text.includes(needle)) return symbol;
-  }
+  const codeMatch = text.match(/\b\d{4,6}[A-Z]?\b/) || text.match(/\d{4,6}[A-Z]?/);
+  if (codeMatch) return codeMatch[0];
+
+  // Do not silently assign an unknown Chinese name to the selected/default stock.
+  if (/[\u3400-\u9fff]/.test(rawName)) return "UNKNOWN";
   return text.replace(/[^\dA-Z]/g, "").slice(0, 12) || "UNKNOWN";
 }
 
@@ -5482,7 +5503,7 @@ function mapBrokerRow(row, context) {
   if (!symbol) symbol = inferSymbol(securityName);
   
   if (!symbol || symbol === "UNKNOWN") {
-    symbol = securityById(context.securityId)?.symbol || "UNKNOWN";
+    symbol = securityName ? `UNKNOWN_${simpleHash(securityName)}` : securityById(context.securityId)?.symbol || "UNKNOWN";
   }
   
   const security = ensureSecurity(symbol, securityName);
@@ -5501,6 +5522,21 @@ function mapBrokerRow(row, context) {
     tax: toNumber(row["交易稅"]),
     orderNo: String(row["委託書號"] || "").trim()
   };
+}
+
+function repairBrokerExecutionSecurityIds() {
+  let changed = false;
+  state.brokerExecutions = state.brokerExecutions.map((execution) => {
+    const securityName = String(execution.securityName || "").trim();
+    if (!securityName) return execution;
+    const symbol = inferSymbol(securityName);
+    if (!symbol || symbol === "UNKNOWN") return execution;
+    const security = ensureSecurity(symbol, securityName);
+    if (security.id === execution.securityId) return execution;
+    changed = true;
+    return { ...execution, securityId: security.id, updatedAt: nowIso() };
+  });
+  return changed;
 }
 
 function normalizeTransaction(input) {
@@ -5889,6 +5925,7 @@ function recomputeCashLedger() {
 }
 
 function runReconciliation() {
+  repairBrokerExecutionSecurityIds();
   const links = [];
   const appGroups = groupTransactionsForReconciliation(state.appTransactions, false, false);
   const brokerGroups = groupTransactionsForReconciliation(state.brokerExecutions, true, false);
