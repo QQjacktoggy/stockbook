@@ -5347,7 +5347,7 @@ function importBrokerCsv(text, context) {
     };
     state.rawImportRows.push(rawRow);
     const mapped = mapBrokerRow(row, context);
-    const checksum = simpleHash(JSON.stringify(mapped));
+    const checksum = brokerExecutionChecksum(mapped);
     if (existingKeys.has(checksum)) {
       rawRow.parseStatus = "DUPLICATE";
       rawRow.parseError = "重複券商成交，已略過";
@@ -5524,6 +5524,23 @@ function mapBrokerRow(row, context) {
   };
 }
 
+function brokerExecutionChecksum(execution, securityId = execution.securityId) {
+  return simpleHash(JSON.stringify({
+    securityId,
+    securityName: String(execution.securityName || "").trim(),
+    tradeDate: parseDate(execution.tradeDate),
+    shares: toNumber(execution.shares),
+    netAmount: toNumber(execution.netAmount),
+    side: normalizeSide(execution.brokerSideRaw || execution.side),
+    brokerSideRaw: String(execution.brokerSideRaw || "").trim(),
+    price: toNumber(execution.price),
+    grossAmount: toNumber(execution.grossAmount),
+    fee: toNumber(execution.fee),
+    tax: toNumber(execution.tax),
+    orderNo: String(execution.orderNo || "").trim()
+  }));
+}
+
 function repairBrokerExecutionSecurityIds() {
   let changed = false;
   state.brokerExecutions = state.brokerExecutions.map((execution) => {
@@ -5532,9 +5549,10 @@ function repairBrokerExecutionSecurityIds() {
     const symbol = inferSymbol(securityName);
     if (!symbol || symbol === "UNKNOWN") return execution;
     const security = ensureSecurity(symbol, securityName);
-    if (security.id === execution.securityId) return execution;
+    const checksum = brokerExecutionChecksum(execution, security.id);
+    if (security.id === execution.securityId && checksum === execution.checksum) return execution;
     changed = true;
-    return { ...execution, securityId: security.id, updatedAt: nowIso() };
+    return { ...execution, securityId: security.id, checksum, updatedAt: nowIso() };
   });
   return changed;
 }

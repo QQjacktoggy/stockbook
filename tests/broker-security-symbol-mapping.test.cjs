@@ -54,9 +54,42 @@ const actual = JSON.parse(vm.runInContext(`
     return { name, symbol: securityById(row.securityId).symbol };
   });
   const unknown = mapBrokerRow({ 股名: "未知台股", 日期: "2026/08/11", 成交股數: "1", 淨收付金額: "-100", 買賣別: "現買", 成交價: "100", 成本: "100", 手續費: "0", 交易稅: "0", 委託書號: "UNKNOWN" }, { securityId: "sec-0050" });
-  state.brokerExecutions = [{ id: "broker-1", securityId: "sec-0050", securityName: "台積電" }];
+  state.brokerExecutions = [{
+    id: "broker-1",
+    userId: "user-1",
+    portfolioId: "portfolio-1",
+    securityId: "sec-0050",
+    securityName: "台積電",
+    tradeDate: "2026-08-11",
+    shares: 1,
+    netAmount: -100,
+    side: "BUY",
+    brokerSideRaw: "現買",
+    price: 100,
+    grossAmount: 100,
+    fee: 0,
+    tax: 0,
+    orderNo: "TEST",
+    checksum: "legacy-0050-checksum"
+  }];
   const repaired = repairBrokerExecutionSecurityIds();
-  JSON.stringify({ inferred, mapped, unknownSymbol: securityById(unknown.securityId).symbol, repaired, repairedSymbol: securityById(state.brokerExecutions[0].securityId).symbol });
+  const csv = [
+    "summary",
+    "股名,日期,成交股數,淨收付金額,買賣別,成交價,成本,手續費,交易稅,委託書號",
+    "台積電,2026/08/11,1,-100,現買,100,100,0,0,TEST"
+  ].join("\\n");
+  importBrokerCsv(csv, { userId: "user-1", portfolioId: "portfolio-1", brokerId: "broker-1", brokerAccountId: "account-1", sourceFilename: "penny.csv" });
+  const importBatch = state.importBatches.at(-1);
+  JSON.stringify({
+    inferred,
+    mapped,
+    unknownSymbol: securityById(unknown.securityId).symbol,
+    repaired,
+    repairedSymbol: securityById(state.brokerExecutions[0].securityId).symbol,
+    repairedChecksumMatches: state.brokerExecutions[0].checksum === brokerExecutionChecksum(state.brokerExecutions[0]),
+    importBatch: { status: importBatch.status, duplicateCount: importBatch.duplicateCount, createdCount: importBatch.createdCount },
+    brokerExecutionCount: state.brokerExecutions.length
+  });
 `, context));
 
 for (const row of actual.inferred) assert.equal(row.actual, row.expected, `${row.name} symbol inference`);
@@ -64,4 +97,7 @@ for (const row of actual.mapped) assert.equal(row.symbol, actual.inferred.find((
 assert.match(actual.unknownSymbol, /^UNKNOWN_/);
 assert.equal(actual.repaired, true);
 assert.equal(actual.repairedSymbol, "2330");
-console.log("broker security symbol mapping: PASS");
+assert.equal(actual.repairedChecksumMatches, true);
+assert.deepEqual(actual.importBatch, { status: "DUPLICATE", duplicateCount: 1, createdCount: 0 });
+assert.equal(actual.brokerExecutionCount, 1);
+console.log("broker security symbol mapping and checksum: PASS");
