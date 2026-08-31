@@ -107,6 +107,10 @@ const DEFAULT_TEMPLATE = {
 const app = document.querySelector("#app");
 const toast = document.querySelector("#toast");
 let state = loadState();
+if (repairBrokerExecutionSecurityIds()) {
+  runReconciliation();
+  persist();
+}
 let firebaseRuntime = null;
 let firebaseAutoSyncTimer = null;
 let firebaseAutoSyncInFlight = false;
@@ -494,13 +498,24 @@ function securityTaxRate(security, feeSetting) {
     : toNumber(feeSetting.stockSellTaxRate ?? feeSetting.sellTaxRate ?? 0.003);
 }
 function inferSymbol(name) {
-  const text = String(name || "").toUpperCase();
-  
-  const codeMatch = text.match(/\b\d{4,6}\b/) || text.match(/\d{4,6}/);
+  const rawName = String(name || "").trim();
+  const text = rawName.toUpperCase();
+  const normalizedName = rawName.replace(/[\s　]/g, "").toUpperCase();
+
+  const knownNames = {
+    "群益台灣加權正2": "00685L",
+    "群益臺灣加權正2": "00685L"
+  };
+  if (knownNames[normalizedName]) return knownNames[normalizedName];
+
+  const codeMatch = text.match(/\b\d{4,6}[A-Z]?\b/) || text.match(/\d{4,6}[A-Z]?/);
   if (codeMatch) return codeMatch[0];
-  
+
   if (typeof state !== "undefined" && state.securities) {
-    const found = state.securities.find((s) => s.name === name || name.includes(s.name) || s.name.includes(name));
+    const found = state.securities.find((s) => {
+      const securityName = String(s.name || "").replace(/[\s　]/g, "").toUpperCase();
+      return securityName && securityName === normalizedName;
+    }) || state.securities.find((s) => rawName.includes(s.name) || s.name.includes(rawName));
     if (found) return found.symbol;
   }
 
@@ -514,6 +529,7 @@ function inferSymbol(name) {
   for (const [needle, symbol] of known) {
     if (text.includes(needle)) return symbol;
   }
+  if (/[\u3400-\u9fff]/.test(rawName)) return "UNKNOWN";
   return text.replace(/[^\dA-Z]/g, "").slice(0, 12) || "UNKNOWN";
 }
 
@@ -5503,6 +5519,21 @@ function mapBrokerRow(row, context) {
   };
 }
 
+function repairBrokerExecutionSecurityIds() {
+  let changed = false;
+  state.brokerExecutions = state.brokerExecutions.map((execution) => {
+    const securityName = String(execution.securityName || "").trim();
+    if (!securityName) return execution;
+    const symbol = inferSymbol(securityName);
+    if (!symbol || symbol === "UNKNOWN") return execution;
+    const security = ensureSecurity(symbol, securityName);
+    if (security.id === execution.securityId) return execution;
+    changed = true;
+    return { ...execution, securityId: security.id, updatedAt: nowIso() };
+  });
+  return changed;
+}
+
 function normalizeTransaction(input) {
   const tx = { ...input };
   tx.transactionType = normalizeType(tx.transactionType);
@@ -5889,6 +5920,7 @@ function recomputeCashLedger() {
 }
 
 function runReconciliation() {
+  repairBrokerExecutionSecurityIds();
   const links = [];
   const appGroups = groupTransactionsForReconciliation(state.appTransactions, false, false);
   const brokerGroups = groupTransactionsForReconciliation(state.brokerExecutions, true, false);
