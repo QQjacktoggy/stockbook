@@ -506,11 +506,12 @@ function inferSymbol(name) {
   const rawName = String(name || "").trim();
   const text = rawName.toUpperCase();
   const normalizedName = rawName.replace(/[\s　]/g, "").toUpperCase();
-
   // These CSVs do not include a stock-code column, so use full-name aliases.
   // Exact matching prevents 「元大台灣50正2」 from being classified as 0050.
   const knownNames = {
     "元大台灣50正2": "00631L",
+    "群益台灣加權正2": "00685L",
+    "群益臺灣加權正2": "00685L",
     "元大台灣50": "0050",
     "台灣50": "0050",
     "台積電": "2330",
