@@ -626,7 +626,7 @@ canvas {
     opacity 180ms ease,
     transform 180ms ease;
   pointer-events: none;
-  z-index: 10;
+  z-index: 120;
 }
 
 .toast.show {
@@ -830,6 +830,135 @@ canvas {
     font-size: clamp(13px, 3.8vw, 16px);
     line-height: 1.05;
     overflow-wrap: anywhere;
+  }
+}
+
+/* Inventory cost exchange */
+.quick-entry-sheet.cost-exchange-sheet {
+  width: min(860px, calc(100vw - 32px));
+}
+
+.cost-exchange-grid {
+  align-content: start;
+}
+
+.cost-exchange-notice,
+.cost-exchange-source-summary {
+  display: grid;
+  gap: 5px;
+  padding: 14px 16px;
+  border: 1px solid rgba(14, 116, 104, 0.2);
+  border-radius: 16px;
+  background: rgba(236, 253, 245, 0.78);
+}
+
+.cost-exchange-notice span,
+.cost-exchange-source-summary span,
+.cost-exchange-source-summary small,
+.cost-exchange-preview > small {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.cost-exchange-target-section {
+  display: grid;
+  gap: 10px;
+}
+
+.cost-exchange-target-list {
+  display: grid;
+  gap: 10px;
+}
+
+.cost-exchange-target {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(130px, 0.42fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.cost-exchange-target.selected {
+  border-color: rgba(14, 116, 104, 0.48);
+  background: rgba(236, 253, 245, 0.7);
+}
+
+.cost-exchange-target.invalid {
+  border-color: rgba(220, 38, 38, 0.55);
+  background: rgba(254, 242, 242, 0.8);
+}
+
+.cost-exchange-target-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cost-exchange-target-check input {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+}
+
+.cost-exchange-target-check span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.cost-exchange-target-check strong,
+.cost-exchange-target-check small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cost-exchange-target-check small,
+.cost-exchange-target-after {
+  color: var(--muted);
+}
+
+.cost-exchange-reduction {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cost-exchange-reduction input {
+  min-width: 0;
+}
+
+.cost-exchange-target-after {
+  min-width: 92px;
+  text-align: right;
+}
+
+.cost-exchange-preview {
+  display: grid;
+  gap: 10px;
+}
+
+.cost-exchange-history .table-wrap {
+  margin-top: 4px;
+}
+
+@media (max-width: 760px) {
+  .quick-entry-sheet.cost-exchange-sheet {
+    width: min(100%, 560px);
+  }
+
+  .cost-exchange-target {
+    grid-template-columns: minmax(0, 1fr) minmax(108px, 0.45fr);
+  }
+
+  .cost-exchange-target-after {
+    grid-column: 1 / -1;
+    text-align: right;
   }
 }
 
@@ -1752,11 +1881,16 @@ body {
 .quick-entry-overlay {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  z-index: 100;
   display: grid;
   align-items: end;
   background: rgba(15, 23, 42, 0.28);
   padding: 16px max(12px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  overscroll-behavior: contain;
+}
+
+body.quick-entry-open {
+  overflow: hidden;
 }
 
 .quick-entry-sheet {
@@ -1772,6 +1906,11 @@ body {
   display: flex;
   flex-direction: column;
   max-height: 90vh;
+  overflow: hidden;
+}
+
+.quick-entry-sheet [hidden] {
+  display: none !important;
 }
 
 .quick-entry-head {
@@ -1819,6 +1958,8 @@ body {
   overflow-y: auto;
   min-height: 0;
   padding: 4px;
+  scroll-padding-block: 12px 88px;
+  overscroll-behavior: contain;
 }
 
 .quick-entry-grid .full {
@@ -1835,6 +1976,17 @@ body {
 
 .quick-entry-actions .btn {
   min-height: 48px;
+}
+
+.quick-entry-error {
+  padding: 10px 12px;
+  border: 1px solid rgba(220, 38, 38, 0.32);
+  border-radius: 8px;
+  background: rgba(254, 226, 226, 0.72);
+  color: #991b1b;
+  font-size: 13px;
+  font-weight: 850;
+  line-height: 1.45;
 }
 
 .fee-settings {
@@ -1878,12 +2030,11 @@ body {
 
 @media (max-width: 860px) {
   .quick-entry-overlay {
-    padding-bottom: calc(50px + env(safe-area-inset-bottom));
+    padding: 12px max(8px, env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
   }
 
   .quick-entry-sheet {
-    max-height: calc(100svh - 80px);
-    overflow: hidden;
+    max-height: calc(100dvh - 24px - env(safe-area-inset-bottom));
   }
 
   .quick-entry-grid {
@@ -3181,10 +3332,11 @@ td {
   .action-cash .action-icon { background: var(--cash); }
   .action-income .action-icon { background: var(--profit); }
   .action-withdraw .action-icon { background: var(--warning); }
+  .action-cost .action-icon { background: var(--accent); }
 
   .quick-entry-overlay {
     align-items: end;
-    padding: 12px 12px calc(50px + env(safe-area-inset-bottom));
+    padding: 12px max(8px, env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
     background: rgba(15, 23, 42, 0.22);
   }
 
@@ -3192,7 +3344,7 @@ td {
     width: min(100%, 560px);
     border-radius: 28px 28px 22px 22px;
     padding: 16px;
-    max-height: calc(100svh - 80px);
+    max-height: calc(100dvh - 24px - env(safe-area-inset-bottom));
     overflow: hidden;
   }
 
@@ -3532,7 +3684,7 @@ td {
   }
 
   .quick-entry-actions {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr 1.25fr;
   }
 }
 
