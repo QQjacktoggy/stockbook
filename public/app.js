@@ -1,4 +1,7 @@
 const STORAGE_KEY = "stock-ledger-webapp-v1";
+const STORAGE_DB_NAME = "stock-ledger-local-v1";
+const STORAGE_DB_VERSION = 1;
+const STORAGE_STORE_NAME = "appState";
 const SAMPLE_JSON_PATH = "data/0050_交易紀錄備份_2026-07-01.json";
 const SAMPLE_CSV_PATH = `data/${encodeURIComponent("證券對帳單 20260701162400.csv")}`;
 
@@ -106,7 +109,10 @@ const DEFAULT_TEMPLATE = {
 
 const app = document.querySelector("#app");
 const toast = document.querySelector("#toast");
-let state = loadState();
+let storageDbPromise = null;
+let persistQueue = Promise.resolve();
+let persistFailureShown = false;
+let state = await loadState();
 if (repairBrokerExecutionSecurityIds()) {
   runReconciliation();
   persist();
@@ -197,13 +203,77 @@ function initialState() {
   };
 }
 
-function loadState() {
+function readLegacyState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    const parsed = raw ? JSON.parse(raw) : initialState();
-    return normalizeState(parsed);
+    return raw ? normalizeState(JSON.parse(raw)) : null;
   } catch {
-    return initialState();
+    return null;
+  }
+}
+
+function openStateDatabase() {
+  if (!window.indexedDB) return Promise.reject(new Error("此瀏覽器不支援 IndexedDB"));
+  if (!storageDbPromise) {
+    storageDbPromise = new Promise((resolve, reject) => {
+      const request = window.indexedDB.open(STORAGE_DB_NAME, STORAGE_DB_VERSION);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(STORAGE_STORE_NAME)) db.createObjectStore(STORAGE_STORE_NAME);
+      };
+      request.onsuccess = () => {
+        const db = request.result;
+        db.onversionchange = () => db.close();
+        resolve(db);
+      };
+      request.onerror = () => reject(request.error || new Error("無法開啟本機資料庫"));
+    }).catch((error) => {
+      storageDbPromise = null;
+      throw error;
+    });
+  }
+  return storageDbPromise;
+}
+
+async function readIndexedState() {
+  const db = await openStateDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORAGE_STORE_NAME, "readonly");
+    const request = transaction.objectStore(STORAGE_STORE_NAME).get(STORAGE_KEY);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error || new Error("無法讀取本機資料庫"));
+    transaction.onabort = () => reject(transaction.error || new Error("讀取本機資料庫失敗"));
+  });
+}
+
+async function writeIndexedState(snapshot) {
+  const db = await openStateDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORAGE_STORE_NAME, "readwrite");
+    transaction.objectStore(STORAGE_STORE_NAME).put({ state: snapshot, savedAt: Date.now() }, STORAGE_KEY);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("無法寫入本機資料庫"));
+    transaction.onabort = () => reject(transaction.error || new Error("寫入本機資料庫失敗"));
+  });
+}
+
+async function loadState() {
+  const legacyState = readLegacyState();
+  try {
+    const saved = await readIndexedState();
+    if (saved?.state) {
+      const restoredState = legacyState || normalizeState(saved.state);
+      if (legacyState) await writeIndexedState(legacyState);
+      try { localStorage.removeItem(STORAGE_KEY); } catch { /* IndexedDB already holds the account data. */ }
+      return restoredState;
+    }
+    const migratedState = legacyState || initialState();
+    await writeIndexedState(migratedState);
+    try { localStorage.removeItem(STORAGE_KEY); } catch { /* Keep using the IndexedDB copy. */ }
+    return migratedState;
+  } catch (error) {
+    console.warn("IndexedDB is unavailable; using the existing browser storage when possible.", error);
+    return legacyState || initialState();
   }
 }
 
@@ -235,7 +305,28 @@ function normalizeState(input) {
 }
 
 function persist() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  const snapshot = state;
+  persistQueue = persistQueue.catch(() => {}).then(async () => {
+    try {
+      await writeIndexedState(snapshot);
+      try { localStorage.removeItem(STORAGE_KEY); } catch { /* The IndexedDB copy is already saved. */ }
+      persistFailureShown = false;
+      return true;
+    } catch (indexedDbError) {
+      console.warn("IndexedDB save failed; trying the legacy browser storage.", indexedDbError);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+      persistFailureShown = false;
+      return true;
+    }
+  }).catch((error) => {
+    console.error("Could not save the local ledger.", error);
+    if (!persistFailureShown) {
+      persistFailureShown = true;
+      showToast("本機儲存失敗，這次變更尚未保存。請先下載 JSON 備份，並確認瀏覽器允許網站儲存資料。", 9000);
+    }
+    return false;
+  });
+  return persistQueue;
 }
 
 function commit(message) {
@@ -246,11 +337,11 @@ function commit(message) {
   scheduleFirebaseAutoSync();
 }
 
-function showToast(message) {
+function showToast(message, duration = 5200) {
   toast.textContent = message;
   toast.classList.add("show");
   window.clearTimeout(showToast.timer);
-  showToast.timer = window.setTimeout(() => toast.classList.remove("show"), 5200);
+  showToast.timer = window.setTimeout(() => toast.classList.remove("show"), duration);
 }
 
 function nowIso() {
@@ -3429,7 +3520,7 @@ function renderSettings() {
             <input type="file" id="backup-file-import-input" style="display: none;" accept=".json" />
           </div>
           <p style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">如果您無法下載，可長按下方框內文字手動複製：</p>
-          <textarea readonly style="width: 100%; height: 120px; font-family: monospace; font-size: 10px; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px; background: white; color: #334155;" onclick="this.select(); this.setSelectionRange(0, 99999);">${escapeHtml(localStorage.getItem(STORAGE_KEY) || "")}</textarea>
+          <textarea readonly style="width: 100%; height: 120px; font-family: monospace; font-size: 10px; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px; background: white; color: #334155;" onclick="this.select(); this.setSelectionRange(0, 99999);">${escapeHtml(JSON.stringify(state))}</textarea>
         </div>
       </form>
     </section>
@@ -3750,16 +3841,11 @@ async function onClick(event) {
       return;
     }
     if (action === "copy-backup-json") {
+      const rawData = JSON.stringify(state);
       try {
-        const rawData = localStorage.getItem(STORAGE_KEY);
-        if (!rawData) {
-          showToast("本機沒有找到任何資料暫存！");
-          return;
-        }
         await navigator.clipboard.writeText(rawData);
         showToast("已成功複製本機資料到剪貼簿！請將它貼給開發助理備份。");
       } catch (err) {
-        const rawData = localStorage.getItem(STORAGE_KEY);
         const tempTextArea = document.createElement("textarea");
         tempTextArea.value = rawData;
         document.body.appendChild(tempTextArea);
