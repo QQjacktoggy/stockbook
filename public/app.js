@@ -1457,7 +1457,7 @@ function sellInventoryLotOptions(lots, accountId, symbol, tradeDate = today()) {
     .filter((lot) => !cutoffDate || lot.buyDate <= cutoffDate)
     .filter((lot) => inventoryCostExchangeAllowsTradeDate(lot, cutoffDate))
     .filter((lot) => securityById(lot.securityId)?.symbol.toUpperCase() === cleanSymbol)
-    .sort(sortByBuyDateDesc)
+    .sort(sortInventoryLotsByPriceDesc)
     .map(lotMatchOption);
 }
 
@@ -5213,7 +5213,7 @@ function handleSellLot(buyTransactionId) {
     .sort((a, b) => {
       if (a.id === lot.id) return -1;
       if (b.id === lot.id) return 1;
-      return sortByBuyDateDesc(a, b);
+      return sortInventoryLotsByPriceDesc(a, b);
     });
   openQuickEntry("SELL", {
     brokerAccountId: lot.brokerAccountId,
@@ -8814,7 +8814,7 @@ function renderMatchControl(sell) {
         lot.buyDate <= sell.tradeDate &&
         toNumber(lot.remainingShares) + toNumber(matchedByLot.get(lot.id)) > 0
     )
-    .sort(sortByBuyDateDesc)
+    .sort(sortInventoryLotsByPriceDesc)
     .map((lot) => lotMatchOption({
       ...lot,
       remainingShares: toNumber(lot.remainingShares) + toNumber(matchedByLot.get(lot.id))
