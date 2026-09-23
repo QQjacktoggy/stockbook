@@ -1,4 +1,6 @@
 const STORAGE_KEY = "stock-ledger-webapp-v1";
+const STORAGE_META_KEY = `${STORAGE_KEY}-saved-at`;
+const STORAGE_RECOVERY_KEY = `${STORAGE_KEY}-legacy-recovery`;
 const STORAGE_DB_NAME = "stock-ledger-local-v1";
 const STORAGE_DB_VERSION = 1;
 const STORAGE_STORE_NAME = "appState";
@@ -112,6 +114,10 @@ const toast = document.querySelector("#toast");
 let storageDbPromise = null;
 let persistQueue = Promise.resolve();
 let persistFailureShown = false;
+let legacyStateConflictDetected = false;
+let legacyRecoveryAvailable = false;
+let legacyRecoveryPending = false;
+let legacyRecoverySnapshot = null;
 let state = await loadState();
 if (repairBrokerExecutionSecurityIds()) {
   runReconciliation();
@@ -133,6 +139,11 @@ document.addEventListener("input", onInput);
 document.addEventListener("keydown", onKeydown);
 
 render();
+if (legacyStateConflictDetected) {
+  showToast(legacyRecoveryPending
+    ? "偵測到舊版分頁資料；較新的 IndexedDB 帳本已保留，舊資料仍暫存在本機。請下載恢復副本並重新載入其他分頁。"
+    : "偵測到舊版分頁資料，已保留 IndexedDB 帳本並另存恢復副本。請重新載入其他分頁後再操作。", 9000);
+}
 completeGoogleRedirectLogin();
 
 function initialState() {
@@ -206,10 +217,22 @@ function initialState() {
 function readLegacyState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? normalizeState(JSON.parse(raw)) : null;
+    if (!raw) return null;
+    const savedAt = Number(localStorage.getItem(STORAGE_META_KEY) || 0);
+    return {
+      state: normalizeState(JSON.parse(raw)),
+      savedAt: Number.isFinite(savedAt) ? savedAt : 0
+    };
   } catch {
     return null;
   }
+}
+
+function clearLegacyStorage() {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(STORAGE_META_KEY);
+  } catch { /* IndexedDB already holds the account data. */ }
 }
 
 function openStateDatabase() {
@@ -235,22 +258,22 @@ function openStateDatabase() {
   return storageDbPromise;
 }
 
-async function readIndexedState() {
+async function readIndexedState(key = STORAGE_KEY) {
   const db = await openStateDatabase();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(STORAGE_STORE_NAME, "readonly");
-    const request = transaction.objectStore(STORAGE_STORE_NAME).get(STORAGE_KEY);
+    const request = transaction.objectStore(STORAGE_STORE_NAME).get(key);
     request.onsuccess = () => resolve(request.result || null);
     request.onerror = () => reject(request.error || new Error("無法讀取本機資料庫"));
     transaction.onabort = () => reject(transaction.error || new Error("讀取本機資料庫失敗"));
   });
 }
 
-async function writeIndexedState(snapshot) {
+async function writeIndexedState(snapshot, savedAt = Date.now(), key = STORAGE_KEY) {
   const db = await openStateDatabase();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(STORAGE_STORE_NAME, "readwrite");
-    transaction.objectStore(STORAGE_STORE_NAME).put({ state: snapshot, savedAt: Date.now() }, STORAGE_KEY);
+    transaction.objectStore(STORAGE_STORE_NAME).put({ state: snapshot, savedAt }, key);
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error || new Error("無法寫入本機資料庫"));
     transaction.onabort = () => reject(transaction.error || new Error("寫入本機資料庫失敗"));
@@ -262,18 +285,38 @@ async function loadState() {
   try {
     const saved = await readIndexedState();
     if (saved?.state) {
-      const restoredState = legacyState || normalizeState(saved.state);
-      if (legacyState) await writeIndexedState(legacyState);
-      try { localStorage.removeItem(STORAGE_KEY); } catch { /* IndexedDB already holds the account data. */ }
-      return restoredState;
+      try {
+        legacyRecoveryAvailable = Boolean((await readIndexedState(STORAGE_RECOVERY_KEY))?.state);
+      } catch { /* The main ledger remains readable even if the recovery slot is not. */ }
+      // A timestamped localStorage value is a recent fallback from this app.
+      // Untimestamped legacy values may have been recreated by an older tab.
+      if (legacyState?.savedAt && legacyState.savedAt > Number(saved.savedAt || 0)) {
+        await writeIndexedState(legacyState.state, legacyState.savedAt);
+        clearLegacyStorage();
+        return legacyState.state;
+      }
+      if (legacyState && !legacyState.savedAt) {
+        legacyStateConflictDetected = true;
+        legacyRecoverySnapshot = legacyState.state;
+        legacyRecoveryAvailable = true;
+        try {
+          await writeIndexedState(legacyState.state, Date.now(), STORAGE_RECOVERY_KEY);
+          legacyRecoveryAvailable = true;
+        } catch (error) {
+          legacyRecoveryPending = true;
+          console.warn("Could not preserve the legacy recovery copy.", error);
+        }
+      }
+      if (!legacyRecoveryPending) clearLegacyStorage();
+      return normalizeState(saved.state);
     }
-    const migratedState = legacyState || initialState();
-    await writeIndexedState(migratedState);
-    try { localStorage.removeItem(STORAGE_KEY); } catch { /* Keep using the IndexedDB copy. */ }
+    const migratedState = legacyState?.state || initialState();
+    await writeIndexedState(migratedState, legacyState?.savedAt || Date.now());
+    clearLegacyStorage();
     return migratedState;
   } catch (error) {
     console.warn("IndexedDB is unavailable; using the existing browser storage when possible.", error);
-    return legacyState || initialState();
+    return legacyState?.state || initialState();
   }
 }
 
@@ -305,16 +348,23 @@ function normalizeState(input) {
 }
 
 function persist() {
-  const snapshot = state;
+  const snapshot = clone(state);
   persistQueue = persistQueue.catch(() => {}).then(async () => {
     try {
       await writeIndexedState(snapshot);
-      try { localStorage.removeItem(STORAGE_KEY); } catch { /* The IndexedDB copy is already saved. */ }
+      if (!legacyRecoveryPending) clearLegacyStorage();
       persistFailureShown = false;
       return true;
     } catch (indexedDbError) {
       console.warn("IndexedDB save failed; trying the legacy browser storage.", indexedDbError);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+      const savedAt = Date.now();
+      localStorage.setItem(STORAGE_META_KEY, String(savedAt));
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+      } catch (legacyStorageError) {
+        try { localStorage.removeItem(STORAGE_META_KEY); } catch { /* Keep the original error. */ }
+        throw legacyStorageError;
+      }
       persistFailureShown = false;
       return true;
     }
@@ -331,10 +381,14 @@ function persist() {
 
 function commit(message) {
   recomputeAll();
-  persist();
+  const savePromise = persist();
   render();
-  if (message) showToast(message);
-  scheduleFirebaseAutoSync();
+  return savePromise.then((saved) => {
+    if (!saved) return false;
+    if (message) showToast(message);
+    scheduleFirebaseAutoSync();
+    return true;
+  });
 }
 
 function showToast(message, duration = 5200) {
@@ -3518,6 +3572,7 @@ function renderSettings() {
             <button class="btn" type="button" style="background: #10b981; color: white;" data-action="download-backup-file">📥 下載本機 JSON 備份檔</button>
             <button class="btn" type="button" style="background: #6366f1; color: white;" data-action="trigger-import-file">📤 匯入 JSON 備份檔</button>
             <input type="file" id="backup-file-import-input" style="display: none;" accept=".json" />
+            ${legacyRecoveryAvailable ? `<button class="btn" type="button" data-action="download-legacy-recovery">下載舊分頁恢復副本</button>` : ""}
           </div>
           <p style="font-size: 11px; color: #94a3b8; margin-bottom: 4px;">如果您無法下載，可長按下方框內文字手動複製：</p>
           <textarea readonly style="width: 100%; height: 120px; font-family: monospace; font-size: 10px; padding: 8px; border: 1px solid #cbd5e1; border-radius: 4px; background: white; color: #334155;" onclick="this.select(); this.setSelectionRange(0, 99999);">${escapeHtml(JSON.stringify(state))}</textarea>
@@ -3707,7 +3762,7 @@ async function onSubmit(event) {
     if (name === "position-transfer") return handlePositionTransfer(data);
     if (name === "settings-save") return handleSettingsSave(data);
     if (name === "broker-fees-save") return handleBrokerFeesSave(data);
-    if (name === "firebase-save") return handleFirebaseSave(data);
+    if (name === "firebase-save") return await handleFirebaseSave(data);
   } catch (error) {
     console.error(error);
     showToast(formatFirebaseError(error));
@@ -3752,7 +3807,7 @@ async function onClick(event) {
     if (action === "set-report-preset") return handleSetReportPreset(actionButton.dataset.report);
     if (action === "load-sample-json") return loadSampleJson();
     if (action === "load-sample-csv") return loadSampleCsv();
-    if (action === "run-reconciliation") return handleRunReconciliation();
+    if (action === "run-reconciliation") return await handleRunReconciliation();
     if (action === "accept-broker-diffs") return handleAcceptBrokerDiffs();
     if (action === "save-match") return handleSaveMatch(actionButton.dataset.sellId);
     if (action === "edit-match") return handleEditMatch(actionButton.dataset.sellId);
@@ -3810,6 +3865,29 @@ async function onClick(event) {
       showToast("已下載可驗證的 JSON 備份檔。");
       return;
     }
+    if (action === "download-legacy-recovery") {
+      let recoverySnapshot = legacyRecoverySnapshot;
+      if (!recoverySnapshot) {
+        recoverySnapshot = (await readIndexedState(STORAGE_RECOVERY_KEY))?.state || null;
+      }
+      if (!recoverySnapshot) {
+        legacyRecoveryAvailable = false;
+        render();
+        showToast("找不到舊分頁恢復副本。", 9000);
+        return;
+      }
+      const blob = new Blob([JSON.stringify(recoverySnapshot, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `stockbook_legacy_recovery_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      showToast("舊分頁恢復副本已下載，可用 JSON 備份匯入功能檢查或還原。");
+      return;
+    }
     if (action === "trigger-import-file") {
       const fileInput = document.getElementById("backup-file-import-input");
       if (!fileInput) return;
@@ -3826,10 +3904,7 @@ async function onClick(event) {
             if (!confirmed) return;
             await downloadBackupEnvelope("PRE_RESTORE");
             mergeCurrentUserState(importedState);
-            recomputeAll();
-            persist();
-            render();
-            showToast("已完成備份驗證、建立安全備份並匯入資料。");
+            await commit("已完成備份驗證、建立安全備份並匯入資料。");
           } catch (error) {
             console.error(error);
             showToast("匯入失敗：" + (error.message || "請確認檔案格式"));
@@ -4332,7 +4407,7 @@ async function handleImportFile(form, data) {
   } else {
     importBrokerCsv(text, context);
   }
-  commit("匯入完成");
+  if (!await commit("匯入完成")) return;
   promptBrokerDiffConfirmation("匯入完成，對帳發現差異");
 }
 
@@ -4629,12 +4704,12 @@ async function handleQuickEntrySubmit(data) {
 
     auditLog("UPDATE", "app_transaction", tx.id, oldTx, tx, portfolioId);
     state.ui.quickEntry = null;
-    commit("交易已修改");
+    await commit("交易已修改");
     return;
   }
 
   if (["DEPOSIT", "WITHDRAW", "INTEREST", "DIVIDEND"].includes(type)) {
-    await handleManualTransaction({
+    const saved = await handleManualTransaction({
       tradeDate: data.tradeDate,
       brokerAccountId: account.id,
       symbol: getPortfolioSettings(portfolioId).defaultSecurity || "0050",
@@ -4647,9 +4722,9 @@ async function handleQuickEntrySubmit(data) {
       strategyCategory: ["INTEREST", "DIVIDEND"].includes(type) ? type : "CORE",
       linkedBuyTransactionId: "",
       note: data.note
-    });
+    }, tradeTypeLabel(type) + "已記錄");
+    if (!saved) return;
     closeQuickEntry();
-    showToast(`${tradeTypeLabel(type)}已記錄`);
     return;
   }
   const securityForCosts = ensureSecurity(data.symbol, data.securityName);
@@ -4703,7 +4778,7 @@ async function handleQuickEntrySubmit(data) {
     }
   }
 
-  await handleManualTransaction({
+  const saved = await handleManualTransaction({
     tradeDate: data.tradeDate,
     brokerAccountId: account.id,
     symbol: data.symbol,
@@ -4721,9 +4796,9 @@ async function handleQuickEntrySubmit(data) {
     sourceInventoryLotId,
     rebuyCycleId,
     note: data.note
-  });
+  }, (type === "BUY" ? "買進" : "賣出") + "已記錄；請記得上傳同日券商交易紀錄對帳。");
+  if (!saved) return;
   closeQuickEntry();
-  showToast(`${type === "BUY" ? "買進" : "賣出"}已記錄；請記得上傳同日券商交易紀錄對帳。`);
 }
 
 function handleEditTransaction(id) {
@@ -4829,8 +4904,7 @@ async function handleQuickTrade(type) {
     strategyCategory: type === "BUY" ? "TRADING" : "LONG_TERM",
     linkedBuyTransactionId,
     note
-  });
-  showToast(`${type === "BUY" ? "買進" : "賣出"}已記錄；請記得上傳同日券商交易紀錄對帳。`);
+  }, (type === "BUY" ? "買進" : "賣出") + "已記錄；請記得上傳同日券商交易紀錄對帳。");
 }
 
 async function handleQuickCash(type) {
@@ -4858,8 +4932,7 @@ async function handleQuickCash(type) {
     strategyCategory: ["INTEREST", "DIVIDEND"].includes(type) ? type : "CORE",
     linkedBuyTransactionId: "",
     note
-  });
-  showToast(`${tradeTypeLabel(type)}已記錄`);
+  }, tradeTypeLabel(type) + "已記錄");
 }
 
 function selectAccountForQuickEntry(accounts) {
@@ -4975,10 +5048,10 @@ async function handleYahooQuoteSync(options = {}) {
   state.marketQuotes = state.marketQuotes.filter((quote) => !updateIds.has(quote.id)).concat(updates);
   auditLog("UPDATE", "market_quote", portfolioId, marketQuoteAuditSnapshot(before), marketQuoteAuditSnapshot(updates), portfolioId);
   if (silent) {
-    persist();
+    await persist();
     render();
   } else {
-    commit(`現價已更新 ${updates.length} 檔${failures.length ? `，${failures.length} 檔失敗` : ""}`);
+    await commit(`現價已更新 ${updates.length} 檔${failures.length ? `，${failures.length} 檔失敗` : ""}`);
   }
 }
 
@@ -5226,13 +5299,14 @@ async function backfillMissingBenchmarkPrices(portfolioId = selectedPortfolioId(
   }
   if (updated) {
     recomputeAll();
-    persist();
-    scheduleFirebaseAutoSync();
-    showToast(`已回補 ${updated} 筆入出金 0050 基準價`);
+    if (await persist()) {
+      scheduleFirebaseAutoSync();
+      showToast("已回補 " + updated + " 筆入出金 0050 基準價");
+    }
   }
   return updated;
 }
-async function handleManualTransaction(data) {
+async function handleManualTransaction(data, successMessage = "交易已新增") {
   const portfolioId = selectedPortfolioId();
   const account = state.brokerAccounts.find((item) => item.id === data.brokerAccountId && item.portfolioId === portfolioId);
   if (!account) throw new Error("券商帳戶不屬於目前 Portfolio");
@@ -5267,7 +5341,7 @@ async function handleManualTransaction(data) {
   });
   state.appTransactions.push(transaction);
   auditLog("CREATE", "app_transaction", transaction.id, null, transaction, portfolioId);
-  commit("交易已新增");
+  return await commit(successMessage);
 }
 
 function handleCashTransfer(data) {
@@ -5473,21 +5547,19 @@ function handleSettingsSave(data) {
   commit("設定已儲存");
 }
 
-function handleFirebaseSave(data) {
+async function handleFirebaseSave(data) {
   state.settings.firebase.configText = String(data.configText || "").trim();
   state.settings.firebase.namespace = String(data.namespace || "").trim();
   state.settings.firebase.status = "LOCAL_ONLY";
   state.settings.firebase.lastError = "";
   state.settings.firebase.lastErrorAt = "";
   firebaseRuntime = null;
-  persist();
-  showToast("Firebase 設定已儲存");
+  await commit("Firebase 設定已儲存");
 }
 
-function handleRunReconciliation() {
+async function handleRunReconciliation() {
   runReconciliation();
-  persist();
-  render();
+  if (!(await commit())) return;
   const result = promptBrokerDiffConfirmation("重新對帳發現差異", "ALL");
   if (result === null) showToast("已重新對帳");
 }
@@ -5925,7 +5997,7 @@ async function loadSampleJson() {
   }
   if (!text.trim() || isHtmlResponse(text)) text = SAMPLE_JSON_FALLBACK;
   importJsonLedger(text, defaultImportContext("0050_交易紀錄備份_2026-07-01.json"));
-  commit("範例 JSON 已匯入");
+  await commit("範例 JSON 已匯入");
 }
 
 async function loadSampleCsv() {
@@ -5938,7 +6010,7 @@ async function loadSampleCsv() {
   }
   if (!text.trim() || isHtmlResponse(text)) text = SAMPLE_CSV_FALLBACK;
   importBrokerCsv(text, defaultImportContext("證券對帳單 20260701162400.csv"));
-  commit("範例 CSV 已匯入");
+  if (!await commit("範例 CSV 已匯入")) return;
   promptBrokerDiffConfirmation("範例 CSV 對帳發現差異");
 }
 
@@ -6720,10 +6792,7 @@ function acceptBrokerDiffLinks(links, reason = "ACCEPT_BROKER_AMOUNTS") {
   state.acceptedBrokerDiffs = { ...(state.acceptedBrokerDiffs || {}) };
   for (const link of links) state.acceptedBrokerDiffs[brokerDiffAcceptanceKey(link)] = acceptedAt;
   auditLog("ACCEPT_BROKER_AMOUNTS", "reconciliation", selectedPortfolioId(), before, { count: links.length, acceptedAt, reason }, selectedPortfolioId());
-  recomputeAll();
-  persist();
-  render();
-  showToast(`已採用券商數字 ${links.length} 筆`);
+  commit("已採用券商數字 " + links.length + " 筆");
 }
 function reconcileTransactionBucket(appItems, brokerItems) {
   const links = [];
@@ -7139,8 +7208,9 @@ async function syncToFirebase(options = {}) {
   state.settings.firebase.lastError = "";
   state.settings.firebase.lastErrorAt = "";
   state.settings.firebase.status = "SYNCED";
-  persist();
+  const saved = await persist();
   render();
+  if (!saved) return;
   if (!options.silent) showToast("已同步到 Firebase");
 }
 
@@ -7157,7 +7227,7 @@ async function loadFromFirebase() {
   state.settings.firebase.lastError = "";
   state.settings.firebase.lastErrorAt = "";
   state.settings.firebase.status = "SYNCED";
-  commit("已從 Firebase 載入");
+  await commit("已從 Firebase 載入");
 }
 
 function requireFirebaseUser(runtime) {
@@ -7271,8 +7341,9 @@ async function disconnectGoogleDriveBackup() {
   if (!window.confirm("確定解除 Google Drive 連結？每日備份會停止。")) return;
   await callBackupFunction("disconnectDrive");
   state.settings.backup = { ...state.settings.backup, enabled: false, connected: false, connectedEmail: "", lastStatus: "DISCONNECTED" };
-  persist();
+  const saved = await persist();
   render();
+  if (!saved) return;
   showToast("已解除 Google Drive 連結。");
 }
 
