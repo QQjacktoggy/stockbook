@@ -319,9 +319,12 @@ test('Cash transfers move cash between accounts without counting as deposits (A 
  const next=buildOperation(raw,who,pid,{kind:'upsertCashTransfer',fields:f()}),id=next.accountTransfers.at(-1).id;
  assert.equal(cash(next)['review-a'],before['review-a']-1010);assert.equal(cash(next)['review-b'],before['review-b']+1000);
  assert.equal(projectLedger(next,who,pid).transfers[0].amount,1000);assert.equal(next.auditLogs.at(-1).entityType,'account_transfer');
- const edited=buildOperation(next,who,pid,{kind:'upsertCashTransfer',id,fields:f({amount:500,fee:0})});
- assert.equal(cash(edited)['review-a'],before['review-a']-500);assert.equal(edited.accountTransfers.length,1);
- assert.deepEqual(cash(buildOperation(next,who,pid,{kind:'deleteCashTransfer',id})),before);
+ const edited=buildOperation(next,who,pid,{kind:'upsertCashTransfer',id,fields:f({amount:1500,fee:0})});
+ assert.equal(cash(edited)['review-a'],before['review-a']-1500);assert.equal(edited.accountTransfers.length,1);
+ // review-b starts below zero in the fixture: an edit may not push it further down.
+ assert.ok(before['review-b']<0);
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'upsertCashTransfer',id,fields:f({amount:500,fee:0})}),/現金會變成/);
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'deleteCashTransfer',id}),/現金會變成/);
 });
 test('Position transfers are recorded like A and do not move inventory',()=>{
  const raw=fixture(),lots=d=>JSON.stringify(projectLedger(d,who,pid).lots.map(l=>[l.source,l.account,l.qty]));
@@ -365,17 +368,25 @@ test('Securities can be edited, and deleted only when unused',()=>{
 test('First use: B creates a new ledger only where none exists',async()=>{
  const raw=starterLedger(who,{portfolioName:'我的帳本',brokerId:'broker-fubon',accountName:'富邦主帳戶'}),m=projectLedger(raw,who,'');
  assert.equal(m.portfolios[0].name,'我的帳本');assert.equal(m.accounts.length,2);assert.equal(m.trades.length,0);assert.ok(m.defaultCode);
- const docs=new Map(),sdkA=mockSdk(docs),c=await createLedgerClient({}, {sdk:sdkA.sdk});
+ // A REST commit with exists:false preconditions: it creates both documents or neither, and never overwrites.
+ const docs=new Map(),user={...who,getIdToken:async()=>'id-token'},sdkA=mockSdk(docs,user),calls=[];
+ const fetcher=async(url,init)=>{const body=JSON.parse(init.body);calls.push({url,auth:init.headers.Authorization,body});
+  if(body.writes.some(w=>w.currentDocument?.exists!==false))return {ok:false,status:400,json:async()=>({})};
+  const paths=body.writes.map(w=>w.update.name.split('/documents/')[1]);
+  if(paths.some(p=>docs.has(p)))return {ok:false,status:409,json:async()=>({error:{status:'ALREADY_EXISTS'}})};
+  body.writes.forEach((w,i)=>docs.set(paths[i],Object.fromEntries(Object.entries(w.update.fields).map(([k,v])=>[k,v.integerValue!==undefined?Number(v.integerValue):v.booleanValue??v.stringValue]))));
+  return {ok:true,status:200,json:async()=>({})};};
+ const c=await createLedgerClient({projectId:'demo-p'}, {sdk:sdkA.sdk,fetcher});
  await assert.rejects(c.reload(),{code:'stockbook/no-ledger'});
  const model=await c.createLedger({portfolioName:'我的帳本',brokerId:'broker-cathay',accountName:'主帳戶'});
- assert.equal(model.portfolios[0].name,'我的帳本');assert.equal(docs.get(head).ownerUid,who.uid);assert.equal(docs.get(head).ownerEmail,who.email);
+ assert.equal(calls[0].url,'https://firestore.googleapis.com/v1/projects/demo-p/databases/(default)/documents:commit');assert.equal(calls[0].auth,'Bearer id-token');
+ assert.equal(model.portfolios[0].name,'我的帳本');assert.equal(docs.get(head).ownerUid,who.uid);assert.equal(docs.get(head).ownerEmail,who.email);assert.equal(docs.get(head).chunkCount,1);
  const acct=model.accounts.find(a=>a.id!=='all').id,after=await c.commit({kind:'upsertCash',fields:{cashType:'DEPOSIT',account:acct,date:taipeiToday(),amount:5000}});
  assert.equal(after.cash[acct],5000);
- await assert.rejects(c.createLedger({}),{code:'stockbook/exists'});
- // A denied read (rules cannot read a missing document) falls back to a create-only write.
- const docs2=new Map(),m2=mockSdk(docs2);let first=true;const real=m2.sdk[2].runTransaction;
- m2.sdk[2].runTransaction=async(db,fn)=>{if(first){first=false;throw Object.assign(new Error('denied'),{code:'permission-denied'});}return real(db,fn);};
- const c2=await createLedgerClient({}, {sdk:m2.sdk});await c2.createLedger({});assert.ok(docs2.get(head));
+ const saved=JSON.stringify(docs.get(head));
+ await assert.rejects(c.createLedger({}),{code:'stockbook/exists'});assert.equal(JSON.stringify(docs.get(head)),saved,'a second create never overwrites');
+ const denied=await createLedgerClient({projectId:'demo-p'}, {sdk:mockSdk(new Map(),user).sdk,fetcher:async()=>({ok:false,status:403,json:async()=>({error:{status:'PERMISSION_DENIED'}})})});
+ await assert.rejects(denied.createLedger({}),{code:'stockbook/create-denied'});
 });
 const CSV='﻿證券對帳單\n股名,日期,成交股數,淨收付金額,買賣別,成交價,成本,手續費,交易稅,委託書號\n元大台灣50,2026/09/29,"300","-30,012",現買,"100","30,000","12","0",A1\n元大台灣50,2026/09/30,"100","-10,509",現買,"105","10,500","9","0",A2\n元大台灣50,2026/09/25,"50","-5,002",現買,"100","5,000","2","0",A3\n';
 test('CSV import like A: records broker rows, skips duplicates, feeds reconciliation, and batches can be deleted',()=>{
@@ -447,4 +458,25 @@ test('JSON backup uses A\'s stockbook-backup-v2 format; restore replaces the led
  assert.equal(restored.auditLogs.at(-1).action,'RESTORE_BACKUP');assert.deepEqual(restored.extraUnknown,raw.extraUnknown);
  assert.deepEqual(projectLedger(restored,who,pid).cash,projectLedger(raw,who,pid).cash);
  assert.throws(()=>buildOperation(raw,who,pid,{kind:'restoreBackup',state:{}}),/不正確/);
+});
+test('Review fixes: lent buys, cost-exchanged buys, negative cash and ledger permissions',()=>{
+ const raw=fixture();
+ // 1. Shrinking a buy that a borrow sell lends from is rejected once the source lots can no longer cover the lent shares.
+ const lent=buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({type:'sell',borrow:'sell',qty:250,price:112,fee:0,tax:0,sources:'demo-buy-pm,demo-buy-a'})});
+ const t=lent.appTransactions.find(x=>x.id==='demo-buy-pm'),edit=o=>({kind:'upsertTransaction',id:'demo-buy-pm',fields:fields({date:t.tradeDate,account:t.brokerAccountId,qty:t.shares,price:t.price,fee:t.fee,tax:t.tax,...o})});
+ assert.throws(()=>buildOperation(lent,who,pid,edit({qty:1})),/借不到足夠庫存/);
+ assert.ok(buildOperation(lent,who,pid,edit({qty:60})),'200 + 60 still covers 250');
+ assert.ok(buildOperation(lent,who,pid,edit({note:'只改備註'})));
+ // 2. A buy touched by a cost exchange can't change size or price until the exchange is undone.
+ const base=buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({date:'2026-10-01',qty:100,price:120,fee:0})}),extra=base.appTransactions.at(-1);
+ const ex=buildOperation(base,who,pid,{kind:'createCostExchange',fields:{source:'demo-buy-pm',externalPrice:95,date:'2026-10-02',label:'外部',targets:[{id:extra.id,reduction:1}]}});
+ const xedit=(id,o)=>{const b=ex.appTransactions.find(x=>x.id===id);return {kind:'upsertTransaction',id,fields:fields({date:b.tradeDate,account:b.brokerAccountId,qty:b.shares,price:b.price,fee:b.fee,tax:b.tax,...o})};};
+ assert.throws(()=>buildOperation(ex,who,pid,xedit(extra.id,{qty:50,price:200})),/成本交換/);
+ assert.throws(()=>buildOperation(ex,who,pid,xedit('demo-buy-pm',{price:90})),/成本交換/);
+ assert.ok(buildOperation(ex,who,pid,xedit(extra.id,{note:'備註可以改'})));
+ // Low: deleting a deposit can't leave the account below zero.
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'deleteTransaction',id:'demo-deposit'}),/現金會變成/);
+ // Low: renaming another portfolio needs edit rights on that portfolio.
+ const shared=structuredClone(raw);shared.portfolios.push({id:'other-p',userId:'someone',name:'別人的帳本'});shared.portfolioMembers.push({id:'m2',portfolioId:'other-p',userId:'review-user',role:'VIEWER'});
+ assert.throws(()=>buildOperation(shared,who,pid,{kind:'upsertPortfolio',id:'other-p',fields:{name:'改名'}}),/權限|找不到/);
 });

@@ -25,7 +25,7 @@ export function errorText(error){
  if(code.includes('network-request-failed')||code.includes('unavailable'))return '連線失敗，無法確認操作是否完成。請重新載入並檢查這筆交易後再操作。';
  return error?.message||'操作失敗，請重試。';
 }
-export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=null,onAuthChange=()=>{}}={}){
+export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=null,fetcher=(...a)=>fetch(...a),onAuthChange=()=>{}}={}){
  const [appModule,authModule,firestoreModule]=injected||await Promise.all([import(SDK+'firebase-app.js'),import(SDK+'firebase-auth.js'),import(SDK+'firebase-firestore.js')]);
  const app=appModule.initializeApp(config,'stockbook-mobile-b'),auth=authModule.getAuth(app),db=firestoreModule.getFirestore(app);
  let baseline=null,raw=null,model=null,customNamespace='',busy=false,epoch=0,emailLoginPending=false;
@@ -53,21 +53,28 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
   baseline=shot;raw=next;model=projected;customNamespace=namespace;
   return model;
  }
- // First use: write a new ledger only where none exists. A ledger this account owns is always readable (firestore.rules),
- // so a denied read means there is nothing of ours to overwrite; the create rule then rejects anything owned by someone else.
+ // First use: Firestore rules can't read a document that doesn't exist, so a read-then-write transaction can't tell "missing" from "denied".
+ // B therefore creates the head and chunk_0 in one REST commit with an exists:false precondition: it can only create, never overwrite,
+ // even when two devices (or A's first sync) create the same ledger at the same moment. The create rule still checks the owner.
+ async function createOnly(ns,docs){
+  const user=auth.currentUser,token=await user.getIdToken(),base='projects/'+config.projectId+'/databases/(default)/documents/';
+  const value=v=>typeof v==='boolean'?{booleanValue:v}:Number.isInteger(v)?{integerValue:String(v)}:{stringValue:String(v)};
+  const writes=docs.map(([path,data])=>({update:{name:base+path,fields:Object.fromEntries(Object.entries(data).map(([k,v])=>[k,value(v)]))},currentDocument:{exists:false}}));
+  const response=await fetcher('https://firestore.googleapis.com/v1/'+base.slice(0,-1)+':commit',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({writes})});
+  if(response.ok)return;
+  const status=(await response.json().catch(()=>({})))?.error?.status||'';
+  if(response.status===409||status==='ALREADY_EXISTS'||status==='FAILED_PRECONDITION')throw Object.assign(new Error('雲端已經有這個帳本，請重新載入，不會建立新帳本。'),{code:'stockbook/exists'});
+  if(response.status===403||status==='PERMISSION_DENIED')throw Object.assign(new Error('沒有權限建立這個帳本名稱。它可能屬於其他帳號，請確認登入的帳號與帳本名稱。'),{code:'stockbook/create-denied'});
+  throw Object.assign(new Error('建立帳本失敗（'+(status||response.status)+'），請稍後再試。'),{code:'unavailable'});
+ }
  async function createLedger(options={}){
   if(busy)throw new Error('正在儲存，請稍候。');
-  const who=identity(),wanted=options.namespace??customNamespace,ns=namespaceFor(who.email,wanted),headRef=firestoreModule.doc(db,'stockLedgers',ns);
+  const who=identity(),wanted=options.namespace??customNamespace,ns=namespaceFor(who.email,wanted);
   const raw0=starterLedger(who,options),payload=await compressLedger(raw0),updatedAt=new Date().toISOString(),bRevision=crypto.randomUUID();
-  const main={namespace:ns,ownerUid:who.uid,ownerEmail:who.email,updatedAt,chunkCount:1,isCompressed:true,bRevision};
   if(payload.length>800000)throw new Error('新帳本資料異常，未建立。');
   busy=true;
-  try{
-   let readable=true;
-   try{await firestoreModule.runTransaction(db,async tx=>{const head=await tx.get(headRef);if(head.exists())throw Object.assign(new Error('雲端已經有這個帳本，請重新載入，不會建立新帳本。'),{code:'stockbook/exists'});tx.set(headRef,main);tx.set(refs(ns,1)[0],{index:0,data:payload,ownerUid:who.uid,updatedAt});});}
-   catch(error){if(!String(error?.code||'').includes('permission-denied'))throw error;readable=false;}
-   if(!readable)await firestoreModule.runTransaction(db,async tx=>{tx.set(headRef,main);tx.set(refs(ns,1)[0],{index:0,data:payload,ownerUid:who.uid,updatedAt});});
-  }finally{busy=false;}
+  try{await createOnly(ns,[['stockLedgers/'+ns,{namespace:ns,ownerUid:who.uid,ownerEmail:who.email,updatedAt,chunkCount:1,isCompressed:true,bRevision}],['stockLedgers/'+ns+'/chunks/chunk_0',{index:0,data:payload,ownerUid:who.uid,updatedAt}]]);}
+  finally{busy=false;}
   return reload({namespace:wanted});
  }
  async function commit(operation){

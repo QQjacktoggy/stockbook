@@ -46,7 +46,8 @@ export function sellOptions(raw,identity,portfolioId,fields){
 export function borrowOptions(raw,identity,portfolioId,fields){
  const {data}=evaluateLedger(raw,identity,portfolioId),sec=data.securities.find(s=>s.id===fields.code);
  if(!sec)return [];
- return mobileBorrowOptions(data,fields.account,sec.symbol,fields.date,fields.id||'');
+ const old=fields.id?data.appTransactions.find(t=>t.id===fields.id):null;
+ return mobileBorrowOptions(data,fields.account,sec.symbol,fields.date,fields.id||'',old?.sourceInventoryLotId||'');
 }
 // Preview of A's cost exchange plan for the form; throws the same messages A shows.
 export function exchangePreview(raw,identity,portfolioId,fields){
@@ -200,6 +201,7 @@ export function buildOperation(raw,identity,portfolioId,op){
   const f=op.fields||{},name=String(f.name||'').trim().slice(0,80),old=op.id?next.portfolios.find(x=>x.id===op.id):null;
   if(!name)throw new Error('請輸入帳本名稱。');
   if(op.id&&(!old||!evaluatedPortfolios(raw,identity).includes(old.id)))throw new Error('找不到這份帳本。');
+  if(old&&!canWrite(data,user,old.id))throw new Error('這份投資帳本沒有編輯權限。');
   entityType='portfolio';
   if(old){before=clone(old);after={...old,name,updatedAt:now};next.portfolios=next.portfolios.map(x=>x.id===old.id?after:x);entityId=old.id;action='UPDATE';}
   else{
@@ -400,6 +402,8 @@ export function buildOperation(raw,identity,portfolioId,op){
    const borrow=old?String(old.borrowRebuyType||''):type==='SELL'&&f.borrow==='sell'?'BORROW_SELL':type==='BUY'&&f.cycle?'REBUY_FILL':'';
    const sourceField=borrow==='BORROW_SELL'?'sourceInventoryLotId':'linkedBuyTransactionId';
    const financialChanged=old&&(placeChanged||num(old.price)!==price||num(old.fee)!==fee||num(old.tax)!==tax||(type==='SELL'&&Object.hasOwn(f,'sources')&&String(f.sources)!==String(old[sourceField]||'')));
+   // A lets a cost-exchanged buy change size or price and keeps the old adjustment; B asks for the exchange to be undone first.
+   if(type==='BUY'&&old&&(placeChanged||num(old.price)!==price)&&(next.inventoryCostExchanges||[]).some(x=>x.sourceBuyTransactionId===old.id||(x.lotAdjustments||[]).some(a=>a.buyTransactionId===old.id)))throw new Error('這筆買進做過成本交換。請先在庫存頁撤銷成本交換，再修改日期、帳戶、股數或價格。');
    // Borrow sells and borrow buy-backs follow A's quick entry rules (validateBorrowSellSourceLots and the cycle checks).
    let borrowSources=old?.sourceInventoryLotId||'',cycleId=old?.rebuyCycleId||'';
    if(borrow==='BORROW_SELL'&&(!old||financialChanged)){
@@ -458,8 +462,20 @@ export function buildOperation(raw,identity,portfolioId,op){
  const candidate=evaluateLedger(next,identity,pid).data;
  // Editing amounts recomputes matching (as in A), but never leaves another sell without the inventory it had.
  const matched=(d,id)=>d.sellMatches.filter(m=>m.sellTransactionId===id).reduce((s,m)=>s+num(m.matchedShares),0);
- if(op.kind!=='restoreBackup')for(const tx of data.appTransactions.filter(t=>t.transactionType==='SELL'&&!t.borrowRebuyType&&t.id!==op.id)){
+ if(op.kind==='restoreBackup')return next;
+ for(const tx of data.appTransactions.filter(t=>t.transactionType==='SELL'&&!t.borrowRebuyType&&t.id!==op.id)){
   if(matched(candidate,tx.id)<matched(data,tx.id))throw new Error('修改後，'+tx.tradeDate+' 的賣出會配不到足夠庫存。請先調整那筆賣出，或在 A 版處理。');
+ }
+ // Borrow sells must still find the lent shares in their source lots (A's validateBorrowSellSourceLots), e.g. after a source buy shrinks.
+ const lendable=(d,tx)=>{try{mobileValidateBorrow(d,tx.sourceInventoryLotId,tx.shares,{id:tx.brokerAccountId},tx.securityId,tx.portfolioId,tx.id,tx.tradeDate);return true;}catch{return false;}};
+ for(const tx of data.appTransactions.filter(t=>t.transactionType==='SELL'&&t.borrowRebuyType==='BORROW_SELL'&&t.portfolioId===pid&&t.id!==op.id)){
+  const now2=candidate.appTransactions.find(t=>t.id===tx.id);
+  if(now2&&lendable(data,tx)&&!lendable(candidate,now2))throw new Error('修改後，'+tx.tradeDate+' 的借券賣出會借不到足夠庫存。請先調整那筆借券，或改回原本的股數。');
+ }
+ // No account may end with less than zero cash because of this change (an existing shortfall may stay, but not grow).
+ if(op.kind!=='importFile')for(const a of data.brokerAccounts.filter(a=>a.portfolioId===pid)){
+  const was=accountCash(data,pid,a.id),will=accountCash(candidate,pid,a.id);
+  if(will<-0.5&&will<was-0.5)throw new Error((a.accountName||a.name||'券商帳戶')+' 的現金會變成 '+Math.round(will).toLocaleString('zh-TW')+'。請先記錄入金，或調整這次修改。');
  }
  return next;
 }

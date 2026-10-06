@@ -46,3 +46,11 @@
 - 匯出 PDF（A 的 `buildPrettyPdfReportHtml`，開新視窗列印；被擋時改下載 HTML）、匯出 Excel（同 A 的 .xls）、Email 摘要（mailto，內容同 A）。
 - JSON 備份：下載與還原都用 A 的 `stockbook-backup-v2` 格式與 SHA-256 驗證，A、B 互通。還原前先下載目前資料的安全備份，再以 A 的 `mergeCurrentUserState` 取代帳本內容；驗證失敗的檔案拒絕。
 - Google Drive 備份：呼叫現有的 Cloud Functions（`getBackupStatus`、`startDriveAuthorization`、`runBackupNow`、`disconnectDrive`，asia-east1），函式本身不改。
+
+## 審查後的保護（PR #29 review）
+
+- 修改買進後，借券賣出仍要借得到足夠庫存（A 的 `validateBorrowSellSourceLots` 重新驗證），否則拒絕。
+- 做過成本交換的買進，要先撤銷成本交換，才能改日期、帳戶、股數或價格（A 允許，但交換金額會套錯）。
+- 任何修改都不能讓券商帳戶現金變成負數；原本就是負數的帳戶不能再變更少。匯入與還原除外。
+- 第一次建帳本改用 Firestore REST commit 加上 `exists:false` 前置條件：只能新建，兩台裝置同時建立也不會互相覆蓋。
+- 還原前要先下載安全備份並勾選確認；畫面說明還原會取代這個帳號的全部資料，不只是目前的帳本。

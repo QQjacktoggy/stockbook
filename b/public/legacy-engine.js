@@ -3244,7 +3244,7 @@ function escapeAttr(value) {
 
 // A reads text through a DOM element; B also runs outside the browser (tests), so tags and entities are removed directly.
 function stripTags(value) {
-  return String(value ?? "").replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&#096;/g, "`").replace(/&amp;/g, "&");
+  return String(value ?? "").replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&#096;/g, "`").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
 }
 
 export function evaluateLedger(raw, identity, portfolioId='') {
@@ -3269,7 +3269,7 @@ export function mobileCosts(data,type,price,shares,brokerId,security) {state=dat
 export function acceptanceKey(link) {return brokerDiffAcceptanceKey(link);}
 export function mobileNormalizeTransaction(tx) {return normalizeTransaction(tx);}
 export function mobileSettings(data,portfolioId) {state=data;return getPortfolioSettings(portfolioId);}
-export function mobileBorrowOptions(data,account,symbol,date,excludedId='') {state=data;return borrowSourceLotOptions(account,symbol,'',excludedId,date);}
+export function mobileBorrowOptions(data,account,symbol,date,excludedId='',selected='') {state=data;return borrowSourceLotOptions(account,symbol,selected,excludedId,date);}
 export function mobileValidateBorrow(data,sources,shares,account,securityId,portfolioId,excludedId,date) {state=data;return validateBorrowSellSourceLots(sources,shares,account,securityId,portfolioId,excludedId,date);}
 export function mobileExchangeLots(data,portfolioId,accountId) {state=data;return inventoryCostExchangeEligibleLots(portfolioId,accountId);}
 export function mobileExchangeEligible(lot) {return inventoryCostExchangeLotIsEligible(lot);}
