@@ -29,7 +29,11 @@ export function projectLedger(raw,identity,portfolioId='',account='all'){
  for(const id of Object.keys(stocks))stocks[id].used=securitiesUsed.has(id);
  const batches=scoped(data,pid,'importBatches').map(b=>({id:b.id,filename:b.sourceFilename||'',sourceType:b.sourceType||'',importedAt:b.importedAt||b.createdAt||'',rows:num(b.rowCount),created:num(b.createdCount),duplicate:num(b.duplicateCount),from:b.dateFrom||'',to:b.dateTo||'',status:b.status||'',account:b.brokerAccountId,executions:data.brokerExecutions.filter(x=>x.importBatchId===b.id).length,transactions:data.appTransactions.filter(t=>t.importBatchId===b.id).length})).sort((a,b)=>String(b.importedAt).localeCompare(String(a.importedAt)));
  const templates=(data.importTemplates||[]).map(t=>({id:t.id,name:t.templateName||t.id,brokerId:t.brokerId,isDefault:!!t.isDefault||t.id==='tpl-cathay-default',mapping:t.columnMapping||{}}));
- const reconciliation=scoped(data,pid,'reconciliationLinks').map(l=>({...l,key:acceptanceKey(l),settled:['MATCHED','AUTO_GROUP_MATCHED'].includes(l.matchStatus)||!!l.brokerAcceptedAt}));
+ // Links only carry the broker total and the difference, so the ledger side is derived (A shows the same numbers on its reconciliation table).
+ const extras=duplicateExecutions(data,pid),batchById=new Map(data.importBatches.map(b=>[b.id,b])),execById=new Map(data.brokerExecutions.map(x=>[x.id,x]));
+ const reconciliation=scoped(data,pid,'reconciliationLinks').map(l=>{const execs=String(l.brokerExecutionId||'').split(',').filter(Boolean),hasApp=!!String(l.appTransactionId||'').trim(),broker=execs.length?num(l.allocatedNetAmount):null,app=!hasApp?null:execs.length?Math.round((num(l.allocatedNetAmount)-num(l.diffNetAmount))*100)/100:num(l.allocatedNetAmount);
+  const duplicates=execs.filter(id=>extras.has(id)).map(id=>{const x=execById.get(id),b=batchById.get(x?.importBatchId)||{};return {id,orderNo:x?.orderNo||'',shares:num(x?.shares),netAmount:num(x?.netAmount),batch:b.id||'',filename:b.sourceFilename||'',importedAt:b.importedAt||b.createdAt||x?.createdAt||''};});
+  return {...l,key:acceptanceKey(l),appNetAmount:app,brokerNetAmount:broker,duplicates,settled:['MATCHED','AUTO_GROUP_MATCHED'].includes(l.matchStatus)||!!l.brokerAcceptedAt};});
  const drive=raw.settings?.driveImport?.[pid]||{},driveImport={folderId:String(drive.folderId||DEFAULT_FOLDER_ID),folderName:String(drive.folderName||''),keywords:{...(drive.keywords||{})}};
  return {schema:2,driveImport,batches,templates,cycles,matches,exchanges,allAccounts,transfers,positions,brokers,settings:{defaultSecurity:settings.defaultSecurity,defaultRebuyOffset:num(settings.defaultRebuyOffset),coreHoldingShares:num(settings.coreHoldingShares),priceTolerance:num(settings.priceTolerance),amountTolerance:num(settings.amountTolerance),feeAllocationMethod:settings.feeAllocationMethod},defaultCode:(data.securities.find(s=>String(s.symbol||'').toUpperCase()===String(mobileSettings(data,pid).defaultSecurity||'0050').toUpperCase())||{}).id||'',account,cash,lots,trades,stocks,accounts,rebuy,reconciliation,portfolioId:pid,portfolios:evaluated.portfolios.map(p=>({id:p.id,name:p.name||p.portfolioName||'投資帳本'})),user:{id:user.id,name:identity.displayName||user.name||user.email,email:identity.email},updatedAt:'',raw:data};
 }
@@ -119,6 +123,14 @@ export function missingBenchmarks(raw,identity,portfolioId,account='all'){
  return data.appTransactions.filter(t=>t.portfolioId===pid&&['DEPOSIT','WITHDRAW'].includes(t.transactionType)&&(account==='all'||t.brokerAccountId===account)&&!(num(t.benchmarkPrice)>0)).map(t=>({id:t.id,date:t.tradeDate}));
 }
 export function contentCount(data){return mobileContentCount(data);}
+// The same broker fill imported twice (e.g. one CSV loaded again after the import checksum format changed): same account, day, side,
+// stock, order number, execution number, shares, price and net amount. The earliest copy is kept; fills without an order number are never flagged.
+function duplicateExecutions(data,pid){
+ const seen=new Map(),extras=new Map();
+ const rows=data.brokerExecutions.filter(x=>x.portfolioId===pid&&String(x.orderNo||'').trim()).sort((a,b)=>String(a.createdAt||'').localeCompare(String(b.createdAt||''))||String(a.id).localeCompare(String(b.id)));
+ for(const x of rows){const sig=[x.brokerAccountId,x.tradeDate,x.side,x.securityId,String(x.orderNo).trim(),String(x.executionNo||'').trim(),num(x.shares),num(x.price),num(x.netAmount)].join('|');if(seen.has(sig))extras.set(x.id,seen.get(sig));else seen.set(sig,x.id);}
+ return extras;
+}
 export function buildOperation(raw,identity,portfolioId,op){
  const {data,user,portfolioId:pid}=evaluateLedger(raw,identity,portfolioId);
  if(!canWrite(data,user,pid))throw new Error('這份投資帳本沒有編輯權限。');
@@ -302,6 +314,16 @@ export function buildOperation(raw,identity,portfolioId,op){
   next.importBatches=next.importBatches.filter(b=>b.id!==batch.id);next.rawImportRows=(next.rawImportRows||[]).filter(r=>r.importBatchId!==batch.id);next.brokerExecutions=(next.brokerExecutions||[]).filter(x=>x.importBatchId!==batch.id);
   if(txIds.size){next.appTransactions=next.appTransactions.filter(t=>!txIds.has(t.id));next.manualClosedRebuySellIds=(next.manualClosedRebuySellIds||[]).filter(id=>!txIds.has(id));}
   action='DELETE';entityType='import_batch';entityId=batch.id;after={sourceType:batch.sourceType,brokerExecutionCount:execIds.size,appTransactionCount:txIds.size,rawRowCount:rows.length};
+ }else if(op.kind==='removeDuplicateExecutions'){
+  // Removes only broker records that are exact repeats of an earlier import; the earlier copy and every trade stay.
+  const ids=[...new Set(op.ids||[])],extras=duplicateExecutions(data,pid);
+  if(!ids.length)throw new Error('沒有重複的券商紀錄。');
+  if(ids.some(id=>!extras.has(id)))throw new Error('這些券商紀錄已改變，請重新載入。');
+  const execIds=new Set(ids),removed=(next.brokerExecutions||[]).filter(x=>execIds.has(x.id));
+  before={brokerExecutions:clone(removed),acceptedBrokerDiffs:clone(next.acceptedBrokerDiffs||{})};
+  next.acceptedBrokerDiffs=mobileClearAcceptedDiffs(data,execIds,new Set());
+  next.brokerExecutions=(next.brokerExecutions||[]).filter(x=>!execIds.has(x.id));
+  action='DELETE_DUPLICATE_BROKER_EXECUTIONS';entityType='broker_execution';entityId=ids.join(',');after={count:ids.length,kept:ids.map(id=>extras.get(id))};
  }else if(op.kind==='backfillBenchmarks'){
   // A's backfillMissingBenchmarkPrices: only deposits and withdrawals without a price, and only when the lookup found one.
   const rows=(Array.isArray(op.rows)?op.rows:[]).map(r=>({id:r.id,fields:benchmarkFields(r.fields)})).filter(r=>Object.keys(r.fields).length);

@@ -527,3 +527,22 @@ test('Drive import: lists the folder, downloads CSV or exports a Google Sheet, B
  assert.equal((await c.driveFiles('FOLDER1234567'))[0].name,'Bearer t2','an expired token triggers one new Google sign-in');assert.equal(popups,2);
  assert.equal((await c.driveFiles('FOLDER1234567'))[0].name,'Bearer t2','a valid token is reused');assert.equal(popups,2);
 });
+test('Flags a broker fill imported twice, shows the ledger amount, and removes only the later copy',()=>{
+ const raw=fixture(),ex=(id,batch,at,extra={})=>({id,userId:'review-user',portfolioId:pid,brokerId:'broker-yuanta',brokerAccountId:'review-a',securityId:'sec-0050',importBatchId:batch,tradeDate:'2026-09-29',settlementDate:'2026-09-29',side:'BUY',shares:300,price:100,grossAmount:30000,fee:12,tax:0,netAmount:-30012,orderNo:'A2817',createdAt:at,...extra});
+ raw.importBatches=[...(raw.importBatches||[]),{id:'b1',portfolioId:pid,brokerAccountId:'review-a',sourceType:'BROKER_CSV',createdAt:'2026-09-29T08:00:00Z'},{id:'b2',portfolioId:pid,brokerAccountId:'review-a',sourceType:'BROKER_CSV',createdAt:'2026-10-02T08:00:00Z'}];
+ raw.brokerExecutions=[ex('broker-2026-09-29-BUY-A2817-1','b1','2026-09-29T08:00:00Z',{checksum:'890794548216'}),ex('broker-exec-later','b2','2026-10-02T08:00:00Z',{checksum:'1a2457a',executionNo:''})];
+ const m=projectLedger(raw,who,pid),link=m.reconciliation.find(l=>l.tradeDate==='2026-09-29'&&l.side==='BUY');
+ assert.equal(link.matchStatus,'PARTIAL_MATCHED');
+ assert.equal(link.appNetAmount,-30012);assert.equal(link.brokerNetAmount,-60024);
+ assert.deepEqual(link.duplicates.map(d=>[d.id,d.orderNo,d.batch]),[['broker-exec-later','A2817','b2']]);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'removeDuplicateExecutions',ids:['broker-2026-09-29-BUY-A2817-1']}),/已改變/);
+ const next=buildOperation(raw,who,pid,{kind:'removeDuplicateExecutions',ids:['broker-exec-later']}),after=projectLedger(next,who,pid);
+ assert.deepEqual(next.brokerExecutions.map(x=>x.id),['broker-2026-09-29-BUY-A2817-1']);
+ assert.equal(after.reconciliation.find(l=>l.tradeDate==='2026-09-29'&&l.side==='BUY').matchStatus,'MATCHED');
+ assert.deepEqual(next.appTransactions,raw.appTransactions);assert.equal(next.auditLogs.at(-1).action,'DELETE_DUPLICATE_BROKER_EXECUTIONS');
+ // A different order number, or a fill without one, is never treated as a repeat.
+ raw.brokerExecutions[1].orderNo='A2818';assert.deepEqual(projectLedger(raw,who,pid).reconciliation.flatMap(l=>l.duplicates),[]);
+ raw.brokerExecutions.forEach(x=>x.orderNo='');assert.deepEqual(projectLedger(raw,who,pid).reconciliation.flatMap(l=>l.duplicates),[]);
+ // Missing-in-app rows have no ledger amount; missing-in-broker rows have no broker amount.
+ const miss=m.reconciliation.find(l=>l.matchStatus==='MISSING_IN_BROKER');if(miss){assert.equal(miss.brokerNetAmount,null);assert.equal(miss.appNetAmount,miss.allocatedNetAmount);}
+});
