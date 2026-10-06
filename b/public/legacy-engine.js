@@ -1316,6 +1316,133 @@ function sortInventoryLotsByPriceDesc(a, b) {
   if (!nearlyEqual(priceDiff, 0)) return priceDiff;
   return sortByBuyDateDesc(a, b);
 }
+// Ported unchanged from A public/app.js for B phase 2 (borrow, cost exchange, securities).
+function fmtNum(value) {
+  return new Intl.NumberFormat("zh-TW", { maximumFractionDigits: 2 }).format(toNumber(value));
+}
+
+function fmtPrice(value) {
+  return new Intl.NumberFormat("zh-TW", { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(toNumber(value));
+}
+
+function borrowSourceLotOptions(accountId, symbol, selectedValue = "", excludedSellId = "", tradeDate = today()) {
+  const selectedIds = normalizeSourceInventoryLotIds(selectedValue);
+  const reservations = borrowSourceReservations(excludedSellId);
+  return sellInventoryLotOptions(state.buyLots, accountId, symbol, tradeDate)
+    .map((option) => {
+      const lot = findBuyLotBySourceId(option.value);
+      const reserved = lot ? toNumber(reservations.get(lotPrimarySourceId(lot))) : 0;
+      return { ...option, shares: Math.max(0, toNumber(option.shares) - reserved) };
+    })
+    .filter((option) => option.shares > 0 || selectedIds.some((id) => lotMatchesSourceId(findBuyLotBySourceId(option.value), id)));
+}
+
+function validateBorrowSellSourceLots(sourceValue, shares, account, securityId, portfolioId, excludedSellId = "", tradeDate = today()) {
+  const selectedIds = normalizeSourceInventoryLotIds(sourceValue);
+  if (!selectedIds.length) throw new Error("請選擇借券來源庫存。");
+  const reservations = borrowSourceReservations(excludedSellId);
+  const lots = [];
+  const seen = new Set();
+  for (const sourceId of selectedIds) {
+    const lot = findBuyLotBySourceId(sourceId);
+    if (!lot) throw new Error("找不到選取的借券來源庫存。");
+    const primaryId = lotPrimarySourceId(lot);
+    if (seen.has(primaryId)) continue;
+    seen.add(primaryId);
+    if (lot.portfolioId !== portfolioId) throw new Error("選取的借券來源庫存不屬於目前帳本。");
+    if (lot.brokerAccountId !== account.id) throw new Error("選取的借券來源庫存屬於不同券商帳戶。");
+    if (lot.securityId !== securityId) throw new Error("選取的借券來源庫存和賣出股票不同。");
+    if (lot.buyDate > parseDate(tradeDate)) throw new Error("借券來源庫存的買進日期不可晚於賣出日期。");
+    if (!inventoryCostExchangeAllowsTradeDate(lot, tradeDate)) throw new Error("這批庫存的賣出日期不可早於成本互換日期。");
+    const available = Math.max(0, toNumber(lot.remainingShares) - toNumber(reservations.get(primaryId)));
+    lots.push({ lot, available });
+  }
+  const totalAvailable = lots.reduce((total, item) => total + item.available, 0);
+  if (toNumber(shares) > totalAvailable) {
+    const detail = lots.map((item) => fmtPrice(item.lot.buyPrice) + "元 " + fmtNum(item.available) + "股").join(" + ");
+    throw new Error("借出股數 (" + fmtNum(shares) + " 股) 不可超過已選來源庫存可借股數合計 (" + fmtNum(totalAvailable) + " 股" + (detail ? "：" + detail : "") + ")。");
+  }
+  return lots.map((item) => lotPrimarySourceId(item.lot)).join(",");
+}
+
+function inventoryCostExchangeLotIsEligible(lot) {
+  if (!lot || toNumber(lot.originalShares) <= 0) return false;
+  const rawRemaining = toNumber(lot.rawRemainingShares ?? lot.remainingShares);
+  return rawRemaining === toNumber(lot.originalShares) && toNumber(lot.borrowedShares) <= 0 && toNumber(lot.remainingShares) > 0;
+}
+
+function inventoryCostExchangeEligibleLots(portfolioId = selectedPortfolioId(), accountId = selectedBrokerAccountId(portfolioId)) {
+  return borrowAdjustedInventoryLots(state.buyLots)
+    .filter((lot) => lot.portfolioId === portfolioId && (!accountId || lot.brokerAccountId === accountId) && inventoryCostExchangeLotIsEligible(lot))
+    .sort((a, b) => String(a.buyDate || "").localeCompare(String(b.buyDate || "")) || toNumber(b.buyPrice) - toNumber(a.buyPrice));
+}
+
+function inventoryCostExchangeLotLabel(lot) {
+  return `${securityLabel(lot.securityId)}｜${lot.buyDate}｜${fmtNum(lot.originalShares)}股 @ ${fmtPrice(lot.buyPrice)}`;
+}
+
+function calculateInventoryCostExchangePlan(sourceLot, externalPriceInput, targetSelections = []) {
+  const externalPrice = toNumber(externalPriceInput);
+  const sourceShares = toNumber(sourceLot?.originalShares);
+  const sourceCurrentPrice = toNumber(sourceLot?.buyPrice);
+  if (!sourceLot || sourceShares <= 0) throw new Error("換入來源股數無效。");
+  if (externalPrice <= 0) throw new Error("外部庫存成本必須大於 0。");
+  const targetAdjustments = [];
+  let redistributedAmount = 0;
+  for (const selection of targetSelections) {
+    const targetLot = selection.lot;
+    const reductionPerShare = toNumber(selection.reductionPerShare);
+    if (!targetLot || targetLot.buyTransactionId === sourceLot.buyTransactionId) throw new Error("選取的調降庫存已不符合調整資格。");
+    if (targetLot.securityId !== sourceLot.securityId) throw new Error("只能在同一檔股票的庫存批次間分配成本。");
+    if (reductionPerShare <= 0) throw new Error("勾選的庫存必須輸入大於 0 的每股調降金額。");
+    const beforePrice = toNumber(targetLot.buyPrice);
+    const afterPrice = roundMoney(beforePrice - reductionPerShare);
+    if (afterPrice <= 0) throw new Error(`${inventoryCostExchangeLotLabel(targetLot)} 調整後成本必須大於 0。`);
+    const shares = toNumber(targetLot.originalShares);
+    const costDelta = -roundMoney(reductionPerShare * shares);
+    redistributedAmount += Math.abs(costDelta);
+    targetAdjustments.push({
+      buyTransactionId: targetLot.buyTransactionId,
+      brokerAccountId: targetLot.brokerAccountId,
+      shares,
+      beforePrice,
+      reductionPerShare,
+      afterPrice,
+      costDelta
+    });
+  }
+  redistributedAmount = roundMoney(redistributedAmount);
+  const externalSwapCostDelta = roundMoney((externalPrice - sourceCurrentPrice) * sourceShares);
+  const sourceCostDelta = roundMoney(externalSwapCostDelta + redistributedAmount);
+  const sourceFinalPrice = roundMoney(sourceCurrentPrice + sourceCostDelta / sourceShares);
+  if (sourceFinalPrice <= 0) throw new Error("換入批次調整後成本必須大於 0。");
+  const lotAdjustments = [
+    {
+      role: "SOURCE",
+      buyTransactionId: sourceLot.buyTransactionId,
+      brokerAccountId: sourceLot.brokerAccountId,
+      shares: sourceShares,
+      beforePrice: sourceCurrentPrice,
+      afterPrice: sourceFinalPrice,
+      costDelta: sourceCostDelta
+    },
+    ...targetAdjustments.map((item) => ({ role: "TARGET", ...item }))
+  ];
+  const internalAllocationNet = roundMoney(lotAdjustments.reduce((total, item) => total + toNumber(item.costDelta), 0) - externalSwapCostDelta);
+  if (Math.abs(internalAllocationNet) > 1) throw new Error("成本互換驗算失敗，內部分配沒有守恆。");
+  return {
+    externalPrice,
+    sourceShares,
+    sourceCurrentPrice,
+    sourceFinalPrice,
+    externalSwapCostDelta,
+    redistributedAmount,
+    targetAdjustments,
+    lotAdjustments,
+    internalAllocationNet
+  };
+}
+
 export function evaluateLedger(raw, identity, portfolioId='') {
   if (!raw || !Array.isArray(raw.appTransactions)) throw new Error('帳本交易格式不正確，請先在 A 版同步。');
   state=normalizeState(structuredClone(raw));
@@ -1338,3 +1465,9 @@ export function mobileCosts(data,type,price,shares,brokerId,security) {state=dat
 export function acceptanceKey(link) {return brokerDiffAcceptanceKey(link);}
 export function mobileNormalizeTransaction(tx) {return normalizeTransaction(tx);}
 export function mobileSettings(data,portfolioId) {state=data;return getPortfolioSettings(portfolioId);}
+export function mobileBorrowOptions(data,account,symbol,date,excludedId='') {state=data;return borrowSourceLotOptions(account,symbol,'',excludedId,date);}
+export function mobileValidateBorrow(data,sources,shares,account,securityId,portfolioId,excludedId,date) {state=data;return validateBorrowSellSourceLots(sources,shares,account,securityId,portfolioId,excludedId,date);}
+export function mobileExchangeLots(data,portfolioId,accountId) {state=data;return inventoryCostExchangeEligibleLots(portfolioId,accountId);}
+export function mobileExchangeEligible(lot) {return inventoryCostExchangeLotIsEligible(lot);}
+export function mobileExchangePlan(data,sourceLot,externalPrice,targets) {state=data;return calculateInventoryCostExchangePlan(sourceLot,externalPrice,targets);}
+export function mobileAssetType(symbol,name,value) {return normalizeSecurityAssetType(value||inferSecurityAssetType(symbol,name));}

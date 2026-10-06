@@ -1,4 +1,4 @@
-import { projectLedger, buildOperation, estimateCosts, sellOptions } from './model.js';
+import { projectLedger, buildOperation, estimateCosts, sellOptions, borrowOptions, exchangePreview } from './model.js';
 import {createNativeAuth,nativeAuthError} from './native-auth.js';
 const SDK='https://www.gstatic.com/firebasejs/10.12.5/';
 export function namespaceFor(email,custom=''){const value=String(custom||String(email||'').toLowerCase()).trim().replace(/[^a-zA-Z0-9._-]/g,'_');if(!value)throw new Error('找不到帳本名稱。');return value;}
@@ -100,6 +100,8 @@ export async function createLedgerClient(config,{sdk:injected=null,onAuthChange=
   select(portfolioId,account='all'){if(!raw)throw new Error('請先載入帳本。');model=projectLedger(raw,identity(),portfolioId,account);model.updatedAt=baseline?.main.updatedAt||'';return model;},
   costs(fields){if(!raw||!model)return {fee:0,tax:0};return estimateCosts(raw,identity(),model.portfolioId,fields);},
   sellOptions(fields){if(!raw||!model)return [];return sellOptions(raw,identity(),model.portfolioId,fields);},
+  borrowOptions(fields){if(!raw||!model)return [];return borrowOptions(raw,identity(),model.portfolioId,fields);},
+  exchangePreview(fields){if(!raw||!model)throw new Error('請先載入帳本。');return exchangePreview(raw,identity(),model.portfolioId,fields);},
   get user(){return auth.currentUser;},get namespace(){return baseline?.ns||'';},get busy(){return busy;}
  };
  function publishAuth(user){epoch++;baseline=null;raw=null;model=null;onAuthChange(user,client);}

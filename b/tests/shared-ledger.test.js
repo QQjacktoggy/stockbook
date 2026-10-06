@@ -2,7 +2,7 @@ import test from 'node:test';
 // Core transaction and SDK boundary tests use synthetic fixtures only.
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {projectLedger,buildOperation,sellOptions,taipeiToday,minimalLots,CATEGORIES} from '../public/model.js';
+import {projectLedger,buildOperation,sellOptions,borrowOptions,exchangePreview,taipeiToday,minimalLots,CATEGORIES} from '../public/model.js';
 import {fetchQuote,benchmarkFor,yahooSymbolFor} from '../public/quotes.js';
 import {createLedgerClient,namespaceFor,compressLedger,decodeLedger} from '../public/cloud-client.js';
 const original=JSON.parse(readFileSync(new URL('./fixture.json',import.meta.url)));
@@ -215,12 +215,81 @@ test('Matched trades: amounts can change and matching is recomputed',()=>{
  const bigger=buildOperation(raw,who,pid,{kind:'upsertTransaction',id:sell.id,fields:fields({type:'sell',qty:150,price:sell.price,fee:sell.fee,tax:sell.tax,date:sell.tradeDate,time:'',sources:sell.linkedBuyTransactionId})});
  assert.equal(bigger.appTransactions.find(t=>t.id===sell.id).shares,150);
 });
-test('Borrow trades only allow price and cost edits in B',()=>{
- const raw=fixture(),buy=raw.appTransactions.find(t=>t.id==='demo-buy-pm');buy.borrowRebuyType='REBUY_FILL';buy.rebuyCycleId='cycle-x';
- assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertTransaction',id:buy.id,fields:fields({qty:50,price:buy.price,fee:buy.fee,date:buy.tradeDate})}),/借券/);
- const next=buildOperation(raw,who,pid,{kind:'upsertTransaction',id:buy.id,fields:fields({qty:buy.shares,price:104,fee:buy.fee,tax:buy.tax,date:buy.tradeDate})});
- const t=next.appTransactions.find(x=>x.id===buy.id);assert.equal(t.price,104);assert.equal(t.borrowRebuyType,'REBUY_FILL');assert.equal(t.rebuyCycleId,'cycle-x');
- assert.throws(()=>buildOperation(raw,who,pid,{kind:'deleteTransaction',id:buy.id}),/借券/);
+test('Borrow sell from several lots, buy-back cycle, and their limits (A rules)',()=>{
+ const raw=fixture(),before=projectLedger(raw,who,pid),total=m=>m.lots.reduce((s,l)=>s+l.qty,0);
+ const options=borrowOptions(raw,who,pid,fields({type:'sell'}));
+ assert.ok(options.some(o=>o.value==='demo-buy-pm')&&options.some(o=>o.value==='demo-buy-a'));
+ const borrowSell=o=>fields({type:'sell',borrow:'sell',qty:150,price:112,fee:0,tax:0,sources:'demo-buy-pm,demo-buy-a',...o});
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:borrowSell({qty:400})}),/借出股數/);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:borrowSell({sources:''})}),/借券來源/);
+ const lent=buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:borrowSell()}),sell=lent.appTransactions.at(-1);
+ assert.equal(sell.borrowRebuyType,'BORROW_SELL');assert.equal(sell.sourceInventoryLotId,'demo-buy-pm,demo-buy-a');assert.equal(sell.linkedBuyTransactionId,'');
+ let m=projectLedger(lent,who,pid);
+ assert.equal(total(m),total(before)-150,'lent shares leave the sellable inventory');
+ assert.deepEqual(m.cycles.map(c=>[c.id,c.remaining,c.status]),[[sell.id,150,'open']]);
+ assert.equal(borrowOptions(lent,who,pid,fields({type:'sell'})).reduce((s,o)=>s+o.shares,0),total(before)-150-100,'other account not offered; reserved shares not lendable twice');
+ // Buy-back fills the cycle.
+ assert.throws(()=>buildOperation(lent,who,pid,{kind:'upsertTransaction',fields:fields({cycle:sell.id,qty:200,price:108})}),/待回補/);
+ assert.throws(()=>buildOperation(lent,who,pid,{kind:'upsertTransaction',fields:fields({cycle:sell.id,account:'review-b'})}),/相同/);
+ assert.throws(()=>buildOperation(lent,who,pid,{kind:'upsertTransaction',fields:fields({cycle:'nope'})}),/借券任務/);
+ const filled=buildOperation(lent,who,pid,{kind:'upsertTransaction',fields:fields({cycle:sell.id,qty:100,price:108,fee:0})}),fill=filled.appTransactions.at(-1);
+ assert.equal(fill.borrowRebuyType,'REBUY_FILL');assert.equal(fill.rebuyCycleId,sell.id);
+ m=projectLedger(filled,who,pid);
+ assert.deepEqual(m.cycles.map(c=>[c.remaining,c.filled,c.status]),[[50,100,'partial']]);
+ assert.equal(total(m),total(before)-50,'returned shares are sellable again');
+ // Edits follow the same checks; the fill keeps its cycle.
+ const repriced=buildOperation(filled,who,pid,{kind:'upsertTransaction',id:fill.id,fields:fields({qty:100,price:104,fee:0})});
+ assert.equal(repriced.appTransactions.find(t=>t.id===fill.id).rebuyCycleId,sell.id);
+ assert.throws(()=>buildOperation(filled,who,pid,{kind:'upsertTransaction',id:fill.id,fields:fields({qty:151,price:104,fee:0})}),/待回補/);
+ assert.throws(()=>buildOperation(filled,who,pid,{kind:'upsertTransaction',id:sell.id,fields:borrowSell({qty:90})}),/已回補/);
+ const bigger=buildOperation(filled,who,pid,{kind:'upsertTransaction',id:sell.id,fields:borrowSell({qty:120,sources:'demo-buy-pm,demo-buy-a'})});
+ assert.equal(projectLedger(bigger,who,pid).cycles[0].remaining,20);
+ assert.throws(()=>buildOperation(filled,who,pid,{kind:'deleteTransaction',id:sell.id}),/回補/);
+ const unfilled=buildOperation(filled,who,pid,{kind:'deleteTransaction',id:fill.id});
+ assert.equal(projectLedger(unfilled,who,pid).cycles[0].remaining,150);
+ assert.equal(total(projectLedger(buildOperation(unfilled,who,pid,{kind:'deleteTransaction',id:sell.id}),who,pid)),total(before));
+});
+test('Adds a security like A and rejects duplicates',()=>{
+ const raw=fixture();
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'createSecurity',fields:{symbol:'0050'}}),/已存在/);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'createSecurity',fields:{symbol:'台積'}}),/代號/);
+ const next=buildOperation(raw,who,pid,{kind:'createSecurity',fields:{symbol:' 2330 ',name:'台積電'}}),sec=next.securities.at(-1);
+ assert.deepEqual([sec.symbol,sec.name,sec.market,sec.currency,sec.assetType],['2330','台積電','TW','TWD','STOCK']);
+ assert.equal(buildOperation(raw,who,pid,{kind:'createSecurity',fields:{symbol:'00919'}}).securities.at(-1).assetType,'ETF');
+ assert.equal(projectLedger(next,who,pid).stocks[sec.id].symbol,'2330');
+ assert.equal(next.auditLogs.at(-1).entityType,'security');
+ const bought=buildOperation(next,who,pid,{kind:'upsertTransaction',fields:fields({code:sec.id,qty:10,price:900})});
+ assert.ok(projectLedger(bought,who,pid).lots.some(l=>l.code===sec.id));
+});
+test('Sell matching can be viewed and changed (A save-match)',()=>{
+ const raw=fixture(),m=projectLedger(raw,who,pid);
+ assert.deepEqual(m.matches['demo-sell-am'].map(x=>[x.buy,x.qty]),[['demo-buy-a',100]]);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'updateMatch',id:'demo-sell-am',sources:'demo-buy-b'}),/無效/,'other account');
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'updateMatch',id:'demo-sell-am',sources:'demo-buy-pm',shares:0}),/配對股數/);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'updateMatch',id:'demo-buy-a',sources:'demo-buy-pm'}),/一般賣出/);
+ const moved=buildOperation(raw,who,pid,{kind:'updateMatch',id:'demo-sell-am',sources:'demo-buy-pm',shares:100});
+ assert.deepEqual(projectLedger(moved,who,pid).matches['demo-sell-am'].map(x=>[x.buy,x.qty,x.price]),[['demo-buy-pm',100,105]]);
+ assert.equal(moved.auditLogs.at(-1).action,'UPDATE_MATCH');
+ const partial=buildOperation(raw,who,pid,{kind:'updateMatch',id:'demo-sell-am',sources:'demo-buy-a',shares:60});
+ assert.equal(projectLedger(partial,who,pid).matches['demo-sell-am'][0].qty,60);
+ assert.equal(projectLedger(partial,who,pid).trades.find(t=>t.id==='demo-sell-am').manual,60);
+});
+test('Inventory cost exchange: create, preview, delete, and protection after selling',()=>{
+ const raw=buildOperation(fixture(),who,pid,{kind:'upsertTransaction',fields:fields({date:'2026-10-01',qty:100,price:120,fee:0})}),extra=raw.appTransactions.at(-1);
+ const ex=o=>({source:'demo-buy-pm',externalPrice:95,date:'2026-10-02',label:'外部帳戶',targets:[{id:extra.id,reduction:5}],...o});
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'createCostExchange',fields:ex({source:'demo-buy-a'})}),/完整未售出/);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'createCostExchange',fields:ex({date:'2026-09-30'})}),/買進日期/);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'createCostExchange',fields:ex({targets:[{id:'demo-buy-b',reduction:1}]})}),/資格/,'other account');
+ assert.equal(exchangePreview(raw,who,pid,ex()).sourceFinalPrice,100);
+ const next=buildOperation(raw,who,pid,{kind:'createCostExchange',fields:ex()}),m=projectLedger(next,who,pid);
+ assert.equal(m.lots.find(l=>l.buyTx==='demo-buy-pm').cost,100);assert.equal(m.lots.find(l=>l.buyTx===extra.id).cost,115);
+ assert.equal(m.exchanges.length,1);assert.equal(m.exchanges[0].redistributed,500);assert.equal(m.exchanges[0].deletable,true);
+ assert.equal(next.inventoryCostExchanges[0].externalAccountLabel,'外部帳戶');
+ assert.equal(buildOperation(next,who,pid,{kind:'deleteCostExchange',id:next.inventoryCostExchanges[0].id}).inventoryCostExchanges.length,0);
+ const sold=buildOperation(next,who,pid,{kind:'upsertTransaction',fields:fields({type:'sell',qty:10,price:130,sources:'demo-buy-pm'})});
+ assert.equal(projectLedger(sold,who,pid).exchanges[0].deletable,false);
+ assert.throws(()=>buildOperation(sold,who,pid,{kind:'deleteCostExchange',id:next.inventoryCostExchanges[0].id}),/不能撤銷/);
+ assert.equal(buildOperation(next,who,pid,{kind:'deleteTransaction',id:extra.id}).inventoryCostExchanges.length,0,'deleting a buy removes its exchanges, as in A');
 });
 test('Rebuy: a B buy fills the plan like A, and plans can be closed manually',()=>{
  const raw=fixture(),task=projectLedger(raw,who,pid).rebuy.find(r=>r.id==='demo-sell-am');
