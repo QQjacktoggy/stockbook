@@ -161,6 +161,18 @@ h1,h2,h3,p{margin:0}h1{font-family:var(--serif);font-size:22px;font-weight:600;l
 .lot input.reduce{width:96px;height:40px;border:1px solid var(--line);border-radius:6px;padding:0 8px;font-size:15px;accent-color:auto}
 button.lot{font:inherit;color:inherit;cursor:pointer}button.lot svg{width:18px;height:18px;flex:0 0 auto;stroke:currentColor;fill:none;stroke-width:2}
 .form-field .link[data-new-security]{margin-top:6px;font-size:13px}
+/* 股數與成交價是主角：大字、深色；金額、市值退到灰色小字。 */
+.qty,.trade-end .qty,.recon-grid .qty{display:block;font-size:18px;font-weight:700;line-height:1.3;letter-spacing:-.2px;color:var(--ink)}
+.px{display:block;font-size:16px;font-weight:600;line-height:1.35;color:var(--ink)}
+.qty i,.px i{font-style:normal;font-size:12px;font-weight:500;color:var(--muted);margin:0 3px}.qty i{margin-right:0}
+.trade-row,.stock-row{min-height:68px}
+.recon-grid .qty{font-size:20px;margin-top:2px}.recon-grid .px{font-size:17px}.recon-grid small+small{margin-top:4px}
+.sheet .recon-grid{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 15px;margin:0 0 14px}
+.lot b.qp{font-size:17px;font-weight:700;display:block}
+.recon-rows b.qp{font-size:15px;color:var(--ink)}
+.big-detail.qp-big{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:32px;letter-spacing:-.3px}
+.big-detail.qp-big i{font-style:normal;font-family:-apple-system,BlinkMacSystemFont,"Noto Sans CJK TC","Microsoft JhengHei",sans-serif;font-size:15px;font-weight:500;color:var(--muted);margin:0 4px}
+.big-detail.qp-big .hint{flex-basis:100%;margin-top:0;font-weight:400;letter-spacing:0}
 </style>
 <script src="./firebase-config.js"></script></head>
 <body>
