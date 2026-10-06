@@ -36,7 +36,7 @@ const signed=n=>(n>0?'+':n<0?'−':'')+fmt(Math.abs(n));
 const pct=(a,b)=>b?(a>=0?'+':'−')+Math.abs(a/b*100).toFixed(1)+'%':'';
 const tone=n=>n>0?'up':n<0?'down':'';
 let noLedger=false,lastNamespace='',returnForm=null,client=null,state=null,stocks={},accounts=[{id:'all',name:'全部帳戶',full:'所有券商帳戶'}];
-let page='home',period='7',tradeType='all',query='',composing=false,inventoryTab='held',reconTab='open',lastFocus=null,toastTimer,loading=false,authError='',identity=null,authEpoch=0;
+let reportTab='overview',page='home',period='7',tradeType='all',query='',composing=false,inventoryTab='held',reconTab='open',lastFocus=null,toastTimer,loading=false,authError='',identity=null,authEpoch=0;
 function selected(list){return list.filter(x=>state.account==='all'||x.account===state.account);}
 function totals(){let cash=Object.entries(state.cash).filter(([k])=>state.account==='all'||k===state.account).reduce((s,[,v])=>s+v,0),value=0,cost=0,pnl=0,missing=0;for(const l of selected(state.lots)){const price=stocks[l.code]?.price;if(price==null){value+=l.basis;missing++;}else{value+=l.qty*price;cost+=l.basis;pnl+=l.qty*price-l.basis;}}return {cash,value,cost,pnl,total:cash+value,missing};}
 function recent(){return selected(state.trades).slice().sort((a,b)=>b.date.localeCompare(a.date)||(b.time||'00:00').localeCompare(a.time||'00:00')||b.recorded.localeCompare(a.recorded));}
@@ -44,7 +44,7 @@ const CASH_NAMES={deposit:'入金',withdraw:'出金',dividend:'股息',interest:
 function typeName(t){return CASH_NAMES[t.type]||(t.type==='buy'?'買進':'賣出');}
 function tradeRow(t,fullDate){if(t.cash){const when=[fullDate?short(t.date):'',accountName(t.account)].filter(Boolean).join(' · ');return '<button class="trade-row" data-trade="'+esc(t.id)+'"><span class="trade-icon cash">'+CASH_ICONS[t.type]+'</span><span class="trade-main"><strong>'+CASH_NAMES[t.type]+'</strong><small>'+esc(when)+(t.note?' · '+esc(t.note):'')+'</small></span><span class="trade-end"><b>'+(t.net<0?'−':'+')+fmt(Math.abs(t.net))+'</b><small>現金</small></span></button>';}const when=[fullDate?short(t.date):'',t.time||(fullDate?'':'時間未填')].filter(Boolean).join(' ');return '<button class="trade-row" data-trade="'+esc(t.id)+'"><span class="trade-icon '+t.type+'">'+(t.type==='buy'?'買':'賣')+'</span><span class="trade-main"><strong>'+esc(stockName(t.code))+'<span class="code">'+esc(ticker(t.code))+'</span></strong><small>'+(t.borrow?(t.borrow==='BORROW_SELL'?'借券賣出 · ':'借券回補 · '):'')+esc(when)+' · '+esc(accountName(t.account))+'</small></span><span class="trade-end"><b>'+fmt(Math.abs(t.net))+'</b><small>'+fmt(t.qty)+' 股 × '+fmt(t.price)+'</small></span></button>';}
 function go(next){closeSheet(false);page=next;render();document.documentElement.scrollTop=0;document.body.scrollTop=0;requestAnimationFrame(()=>window.scrollTo({top:0,behavior:'instant'}));}
-function render(){ $('#brand-icon').innerHTML=icon('chart');$('#nav').hidden=!state;$('#account-switch').hidden=!state;if(!state){$('#nav').innerHTML='';$('#main').innerHTML=authView();return;}const scope=scopeLabel();$('#account-switch').innerHTML='<span>'+esc(scope)+'</span>'+icon('down');$('#account-switch').setAttribute('aria-label','切換帳本與帳戶，目前：'+scope);const tabs=[['home','首頁'],['trades','交易'],['inventory','庫存'],['reconcile','對帳'],['more','更多']];$('#nav').innerHTML=tabs.map(([id,name])=>'<button data-page="'+id+'" class="'+(id===page?'active':'')+'" '+(id===page?'aria-current="page"':'')+'>'+icon(id)+'<span>'+name+'</span></button>').join('');$('#main').innerHTML=({home,trades:tradePage,inventory:inventoryPage,reconcile:reconcilePage,more:morePage}[page])();}
+function render(){ $('#brand-icon').innerHTML=icon('chart');$('#nav').hidden=!state;$('#account-switch').hidden=!state;if(!state){$('#nav').innerHTML='';$('#main').innerHTML=authView();return;}const scope=scopeLabel();$('#account-switch').innerHTML='<span>'+esc(scope)+'</span>'+icon('down');$('#account-switch').setAttribute('aria-label','切換帳本與帳戶，目前：'+scope);const tabs=[['home','首頁'],['trades','交易'],['inventory','庫存'],['reconcile','對帳'],['more','更多']],navPage=page==='reports'?'more':page;$('#nav').innerHTML=tabs.map(([id,name])=>'<button data-page="'+id+'" class="'+(id===navPage?'active':'')+'" '+(id===navPage?'aria-current="page"':'')+'>'+icon(id)+'<span>'+name+'</span></button>').join('');$('#main').innerHTML=({home,trades:tradePage,inventory:inventoryPage,reconcile:reconcilePage,more:morePage,reports:reportsPage}[page])();}
 function home(){const t=totals(),rows=recent().slice(0,3),pending=issues(),rebuy=buybacks(),lent=openCycles(),count=pending.length+rebuy.length+lent.length;
 return '<p class="eyebrow">資產總覽 · '+esc(slash(today()))+'</p>'
 +'<section class="hero"><p class="eyebrow">'+(t.missing?'總資產估值':'總資產')+'</p><div class="amount"><span class="currency">NT$</span>'+fmt(t.total)+'</div><p class="hero-pnl '+tone(t.pnl)+'">'+(t.cost?(t.pnl>0?'▲ ':t.pnl<0?'▼ ':'')+fmt(Math.abs(t.pnl))+'（'+pct(t.pnl,t.cost)+'）':'待取得報價')+'<span>未實現損益</span></p><div class="hero-grid"><div><span>'+(t.missing?'庫存估值':'股票市值')+'</span><b>'+fmt(t.value)+'</b></div><div><span>帳上現金</span><b>'+fmt(t.cash)+'</b></div></div></section>'
@@ -93,9 +93,9 @@ function batchesSheet(){const list=state.batches;sheet('匯入紀錄','<div clas
 function templateForm(){sheet('新增匯入模板','<form id="template-form"><div id="form-error" role="alert"></div><div class="form-field"><label for="tp-name">模板名稱</label><input id="tp-name" name="name" required></div><div class="form-field"><label for="tp-broker">券商</label><select id="tp-broker" name="brokerId">'+state.brokers.map(b=>'<option value="'+esc(b.id)+'">'+esc(b.name)+'</option>').join('')+'</select></div><div class="form-field"><label for="tp-map">欄位對應 JSON <small>選填，留白沿用國泰</small></label><textarea id="tp-map" name="mapping" placeholder=\'{"tradeDate":"日期","shares":"成交股數"}\'></textarea></div><div class="sticky-submit"><button class="primary wide" type="submit">新增模板</button></div></form>');}
 function menu(iconName,title,sub,attr){return '<button class="menu-row" '+attr+'>'+icon(iconName)+'<span><strong>'+title+'</strong><small>'+sub+'</small></span>'+icon('arrow')+'</button>';}
 function morePage(){const p=state.portfolios.find(p=>p.id===state.portfolioId);return '<div class="page-head"><h1>更多</h1></div><div class="profile"><div class="avatar">'+esc((state.user.name||'J').slice(0,1))+'</div><div><strong>'+esc(state.user.name)+'</strong><small>'+esc(state.user.email)+'</small></div></div>'
-+'<section class="menu-section"><p class="eyebrow">我的帳本</p><div class="list">'+menu('chart','資產摘要','庫存與現金配置','data-report')+menu('wallet','現金餘額','依券商帳戶查看','data-cash')+menu('book','切換帳本與帳戶',esc(scopeLabel()),'data-scope')+menu('chart','股票清單','新增、修改股票與類型','data-stocks')+'</div></section>'
++'<section class="menu-section"><p class="eyebrow">我的帳本</p><div class="list">'+menu('chart','報表與匯出','0050 基準、損益、PDF 與 Excel','data-page="reports"')+menu('chart','資產摘要','庫存與現金配置','data-report')+menu('wallet','現金餘額','依券商帳戶查看','data-cash')+menu('book','切換帳本與帳戶',esc(scopeLabel()),'data-scope')+menu('chart','股票清單','新增、修改股票與類型','data-stocks')+'</div></section>'
 +'<section class="menu-section"><p class="eyebrow">轉帳與設定</p><div class="list">'+menu('wallet','現金轉帳','券商帳戶之間移動現金','data-transfers')+menu('inventory','股票轉戶','記錄帳戶之間的股票移轉','data-positions')+menu('bank','帳本與券商帳戶','新增、改名、停用','data-structure')+menu('settings','費率與帳本設定','手續費、交易稅、預設股票','data-fees')+'</div></section>'
-+'<section class="menu-section"><p class="eyebrow">資料與同步</p><div class="alert">B 版的買賣會寫入正式帳本。舊 A 版同步可能覆蓋這裡的修改：在 B 修改前請關閉 A 分頁，回 A 使用前先按「從 Firebase 載入」。</div><div class="list">'+menu('refresh','重新載入雲端資料','上次載入 '+esc(stamp(state.updatedAt)),'data-reload')+menu('cloud','連線與儲存狀態','Firebase · A、B 共用資料','data-backup')+menu('external','A 版完整功能','CSV 匯入、報表與備份','data-original')+'</div></section>'
++'<section class="menu-section"><p class="eyebrow">資料與同步</p><div class="alert">B 版的買賣會寫入正式帳本。舊 A 版同步可能覆蓋這裡的修改：在 B 修改前請關閉 A 分頁，回 A 使用前先按「從 Firebase 載入」。</div><div class="list">'+menu('refresh','重新載入雲端資料','上次載入 '+esc(stamp(state.updatedAt)),'data-reload')+menu('cloud','資料備份','JSON 備份、還原與 Google Drive','data-backups')+menu('cloud','連線與儲存狀態','Firebase · A、B 共用資料','data-backup')+menu('external','開啟 A 版','切換完成前仍可使用','data-original')+'</div></section>'
 +'<section class="menu-section"><p class="eyebrow">帳號</p><div class="list">'+(client?.nativeAuth.isOwner()?menu('key','登入方式','Google 與 Email／密碼','data-native-settings'):'')+menu('logout','登出','清除這台裝置上的畫面資料','data-logout')+'</div></section>';}
 function toast(msg){clearTimeout(toastTimer);$('#live').innerHTML='<div class="toast">'+esc(msg)+'</div>';toastTimer=setTimeout(()=>{$('#live').innerHTML='';},3300);}
 function closeSheet(restore=true){if(!$('#sheets').firstChild)return;$('#sheets').innerHTML='';$('#app').inert=false;document.body.style.overflow='';if(restore&&lastFocus?.isConnected)lastFocus.focus();}
@@ -250,6 +250,87 @@ async function refreshQuotes(button){
 function report(){const t=totals();sheet('資產摘要','<div class="summary-strip"><div><small>總資產'+(t.missing?'估值':'')+'</small><b>'+fmt(t.total)+'</b></div><div><small>帳上現金</small><b>'+fmt(t.cash)+'</b></div></div><dl class="definition"><div><dt>庫存'+(t.missing?'估值':'市值')+'</dt><dd>'+money(t.value)+'</dd></div><div><dt>已報價庫存損益</dt><dd>'+money(t.pnl)+'</dd></div></dl>'+(t.missing?'<p class="hint">缺報價的庫存暫用成本估算，不計入未實現損益。</p>':'')+'<a class="link" href="https://jackstock-ed2d2.web.app/#/app/reports" target="_blank" rel="noopener">A 版完整報表'+icon('arrow')+'</a>');}
 
 
+// Phase 5: A's 報表頁, exports and backups. The numbers come from A's report functions (legacy-engine.js); B only lays them out.
+const REPORT_TABS=[['overview','總覽'],['benchmark','0050 基準'],['pnl','損益'],['risk','庫存風險'],['cashflow','現金流'],['quality','交易品質']];
+const pctv=v=>(Number(v)*100).toFixed(1)+'%';
+function lineChart(rows,keys){
+ const pts=rows.filter(r=>keys.some(k=>Number.isFinite(Number(r[k.key]))));if(pts.length<2)return '<div class="empty">資料點不足，暫不畫圖</div>';
+ const vals=pts.flatMap(r=>keys.map(k=>Number(r[k.key])||0)),min=Math.min(...vals),max=Math.max(...vals),span=max-min||1,w=320,h=140;
+ const x=i=>(i/(pts.length-1)*w).toFixed(1),y=v=>(h-6-((Number(v)||0)-min)/span*(h-12)).toFixed(1);
+ return '<figure class="chart"><svg viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none" role="img" aria-label="'+esc(keys.map(k=>k.label).join('、'))+'">'+keys.map(k=>'<polyline fill="none" stroke="'+k.color+'" stroke-width="2" vector-effect="non-scaling-stroke" points="'+pts.map((r,i)=>x(i)+','+y(r[k.key])).join(' ')+'"/>').join('')+'</svg><figcaption>'+keys.map(k=>'<span><i style="background:'+k.color+'"></i>'+esc(k.label)+'</span>').join('')+'<span class="hint">'+esc(pts[0].fullDate||pts[0].date)+' – '+esc(pts.at(-1).fullDate||pts.at(-1).date)+'</span></figcaption></figure>';
+}
+function bars(rows){if(!rows.length)return '<div class="empty">這段期間沒有已實現損益</div>';const top=Math.max(...rows.map(r=>Math.abs(r.net)),1);return '<div class="bars">'+rows.map(r=>'<div class="bar"><span>'+esc(r.period.length>7?short(r.period):r.period)+'</span><i class="'+(r.net<0?'neg':'')+'" style="width:'+Math.max(2,Math.abs(r.net)/top*100).toFixed(1)+'%"></i><b class="'+tone(r.net)+'">'+signed(Math.round(r.net))+'</b></div>').join('')+'</div>';}
+function defs(rows){return '<dl class="definition">'+rows.map(([k,v])=>'<div><dt>'+k+'</dt><dd>'+v+'</dd></div>').join('')+'</dl>';}
+function strip(a,b){return '<div class="summary-strip report-strip"><div><small>'+a[0]+'</small><b class="'+(a[2]||'')+'">'+a[1]+'</b></div><div><small>'+b[0]+'</small><b class="'+(b[2]||'')+'">'+b[1]+'</b></div></div>';}
+function benchmarkStrip(b){if(!b?.reportPrice)return '<div class="notice">需要 0050 收盤價或成交價，才能換算等值股數。請先更新報價。</div>';return strip(['操作等值股數',fmt(Math.round(b.operationEquivalentShares*100)/100)],['不操作基準股數',fmt(Math.round(b.passiveShares*100)/100)])+defs([['等值／0050 基準比',b.benchmarkRatio==null?'—':b.benchmarkRatio.toFixed(2)+'×'],['超額股數','<span class="'+tone(b.excessShares)+'">'+signed(Math.round(b.excessShares*100)/100)+'</span>'],['超額等值','<span class="'+tone(b.excessValue)+'">'+signed(Math.round(b.excessValue))+'</span>']]);}
+function reportsPage(){
+ const r=client.report(state.account),missing=client.missingBenchmarks(state.account);
+ const head='<div class="page-head"><h1>報表</h1><button class="link" data-page="more">返回更多</button></div><p class="hint" style="margin-top:-6px">'+esc(scopeLabel())+(r.model?' · 報告日 '+esc(slash(r.model.reportDate)):'')+'</p>'
+ +(missing.length?'<div class="alert" style="margin-bottom:14px">有 '+missing.length+' 筆入出金缺 0050 基準價，基準比較會不準。<button class="link" data-backfill>補齊基準價</button></div>':'')
+ +'<div class="tabs grid3" role="tablist">'+REPORT_TABS.map(([id,n])=>'<button class="'+(reportTab===id?'active':'')+'" data-report-tab="'+id+'" aria-pressed="'+(reportTab===id)+'">'+n+'</button>').join('')+'</div>';
+ const actions='<div class="cash-row report-actions"><button data-export-pdf>匯出 PDF</button><button data-export-xls>匯出 Excel</button><button data-email-report>Email 摘要</button></div>';
+ if(r.empty)return head+'<div class="empty">目前沒有足夠資料產生報表：'+esc(r.empty)+'</div>';
+ const {model:m,quality:q,inventory:inv,cashflow:c,insights}=r,b=m.benchmark;let body='';
+ if(reportTab==='benchmark'){
+  const rows=(b.dailyRows.length?b.dailyRows:b.series).slice().reverse();
+  body=benchmarkStrip(b)+(b.reportPrice?'<h3 class="mini-heading">每日追蹤</h3>'+lineChart(b.series,[{key:'equivalent',label:'操作等值股數',color:'#2f6f5e'},{key:'passive',label:'不操作基準',color:'#4a6fa5'}])
+  +'<h3 class="mini-heading">計算規則</h3>'+defs([['報告日基準價',fmt(b.reportPrice)],['價格來源',esc(b.reportPriceSource)],['入金換算','次一交易日收盤價 × '+b.fractionalShareRatio],['現金也換股',fmt(Math.round(b.cashEquivalentShares*100)/100)+' 股']])
+  +'<h3 class="mini-heading">主要績效列表</h3><div>'+rows.map((x,i)=>(i===10?'<details class="details"><summary>更早的 '+(rows.length-10)+' 天</summary>':'')+'<div class="lot"><span><b>'+esc(slash(x.fullDate||x.date))+'</b><small>0050 '+(x.price?fmt(x.price):'—')+' · 剩餘 '+fmt(Math.round(x.actualShares||0))+' 股 · 現金 '+fmt(Math.round(x.cash||0))+'</small></span><span class="trade-end"><b>'+fmt(Math.round((x.equivalent||0)*100)/100)+'</b><small class="'+tone(x.excess)+'">'+signed(Math.round((x.excess||0)*100)/100)+' 股</small></span></div>').join('')+(rows.length>10?'</details>':'')+'</div>':'');
+ }else if(reportTab==='pnl'){
+  body=strip(['本月淨利',signed(Math.round(m.monthSummary.net)),tone(m.monthSummary.net)],['今年淨利',signed(Math.round(m.yearSummary.net)),tone(m.yearSummary.net)])+defs([['報告日淨利',signed(Math.round(m.daySummary.net))],['本年費稅',money(m.yearSummary.costs)]])
+  +'<h3 class="mini-heading">本月每日已實現損益</h3>'+bars(m.monthDailyRows)+'<h3 class="mini-heading">年度月別淨利</h3>'+bars(m.yearMonthlyRows)
+  +'<h3 class="mini-heading">未實現庫存損益</h3>'+(inv.holdings.length?'<div>'+inv.holdings.map(h=>'<div class="lot"><span><b>'+esc(h.security)+'</b><small>'+fmt(h.shares)+' 股 · 成本 '+fmt(Math.round(h.cost))+' · 佔 '+pctv(h.concentration)+'</small></span><span class="trade-end"><b>'+fmt(Math.round(h.marketValue))+'</b><small class="'+tone(h.unrealized)+'">'+signed(Math.round(h.unrealized))+'</small></span></div>').join('')+'</div>':'<div class="empty">目前沒有庫存</div>');
+ }else if(reportTab==='risk'){
+  body=strip(['最大持股集中度',pctv(inv.maxConcentration)],['庫存估值',fmt(Math.round(inv.totalMarketValue))])+defs([['90 天以上成本',money(inv.agedCost)],['待回補股數',fmt(inv.openRebuyShares)]])
+  +'<h3 class="mini-heading">持股集中度</h3>'+(inv.holdings.length?'<div>'+inv.holdings.map(h=>'<div class="lot"><span><b>'+esc(h.security)+'</b><small>'+fmt(h.shares)+' 股 · 最早買進 '+esc(slash(h.oldestBuy)||'—')+'</small></span><span class="trade-end"><b>'+pctv(h.concentration)+'</b><small>'+fmt(Math.round(h.marketValue))+'</small></span></div>').join('')+'</div>':'<div class="empty">目前沒有庫存</div>')
+  +'<h3 class="mini-heading">庫存老化分布</h3>'+defs(inv.ageBuckets.map(x=>[esc(x.bucket),esc(x.lots)+' 筆 · '+esc(x.shares)+' 股 · '+esc(x.cost)]));
+ }else if(reportTab==='cashflow'){
+  const rows=c.rows.slice().reverse();
+  body=strip(['累計入金',fmt(Math.round(c.deposits))],['累計出金',fmt(Math.round(c.withdraws))])+defs([['淨投入',money(c.netContribution)],['資金週轉率',pctv(c.turnoverRate)],['現金閒置率',pctv(c.cashRatio)]])
+  +'<h3 class="mini-heading">現金流明細</h3>'+(rows.length?'<div>'+rows.slice(0,60).map(x=>'<div class="lot"><span><b>'+esc(slash(x.date))+' '+esc(CASH_NAMES[String(x.type).toLowerCase()]||(x.type==='BUY'?'買進':x.type==='SELL'?'賣出':x.type))+'</b><small>'+esc(['DEPOSIT','WITHDRAW'].includes(x.type)?'':x.security)+'</small></span><span class="trade-end"><b class="'+tone(x.amount)+'">'+signed(Math.round(x.amount))+'</b><small>累計 '+fmt(Math.round(x.running))+'</small></span></div>').join('')+'</div>'+(rows.length>60?'<p class="hint">只列最近 60 筆；完整明細請匯出 PDF。</p>':''):'<div class="empty">目前沒有現金流資料</div>');
+ }else if(reportTab==='quality'){
+  const list=m.matches.slice().reverse();
+  body=strip(['勝率',pctv(q.winRate)],['賺賠比',q.payoffRatio?q.payoffRatio.toFixed(2):'—'])+defs([['Profit Factor',q.profitFactor?q.profitFactor.toFixed(2):'—'],['平均持有天數',q.avgHoldingDays?q.avgHoldingDays.toFixed(1)+' 天':'—'],['平均獲利',money(q.avgWin)],['平均虧損',money(q.avgLoss)],['最大單筆獲利',money(q.bestTrade)],['最大單筆虧損',money(q.worstTrade)],['費用侵蝕率',pctv(q.costDragRate)]])
+  +'<h3 class="mini-heading">已配對交易</h3>'+(list.length?'<div>'+list.slice(0,60).map(x=>'<div class="lot"><span><b>'+esc(short(x.buyDate))+' → '+esc(short(x.sellDate))+'</b><small>'+fmt(x.matchedShares)+' 股 · '+fmt(x.buyPrice)+' / '+fmt(x.sellPrice)+'</small></span><span class="trade-end"><b class="'+tone(x.netProfit)+'">'+signed(Math.round(x.netProfit))+'</b></span></div>').join('')+'</div>'+(list.length>60?'<p class="hint">只列最近 60 筆；完整清單請匯出 PDF。</p>':''):'<div class="empty">目前沒有已配對交易</div>');
+ }else{
+  body=benchmarkStrip(b)+defs([['總資產估值',money(c.totalAssets)],['本月已實現','<span class="'+tone(m.monthSummary.net)+'">'+signed(Math.round(m.monthSummary.net))+'</span>'],['今年已實現淨利','<span class="'+tone(m.yearSummary.net)+'">'+signed(Math.round(m.yearSummary.net))+'</span>'],['勝率',pctv(q.winRate)],['現金閒置率',pctv(c.cashRatio)],['Profit Factor',q.profitFactor?q.profitFactor.toFixed(2):'—'],['最大持股集中度',pctv(inv.maxConcentration)],['費用侵蝕率',pctv(q.costDragRate)]])
+  +'<h3 class="mini-heading">提醒</h3>'+insights.map(i=>'<div class="'+(i.level==='info'?'notice':'alert')+'" style="margin-bottom:8px"><strong>'+esc(i.title)+'</strong><br>'+esc(i.text)+'</div>').join('')
+  +'<h3 class="mini-heading">資產曲線</h3>'+lineChart(m.assetSeries,[{key:'assets',label:'帳面資產',color:'#2f6f5e'},{key:'cash',label:'現金',color:'#4a6fa5'}]);
+ }
+ return head+actions+body;
+}
+// A fills missing deposit/withdraw benchmark prices silently before every export; B shows a button instead, because it writes to the shared ledger.
+async function backfillBenchmarks(button){
+ const rows=client.missingBenchmarks(state.account),code=state.defaultCode;if(!rows.length)return 0;if(!code)throw new Error('帳本沒有預設股票，無法查 0050 基準價。');
+ if(button){button.disabled=true;button.textContent='正在查基準價…';}
+ try{const tx=rows.map(r=>({...r,t:state.trades.find(t=>t.id===r.id)})),found=[];
+  for(const r of tx){const b=await benchmarkFor(stocks[code],code,r.date).catch(()=>null);if(b&&Number(b.benchmarkPrice)>0)found.push({id:r.id,fields:b});}
+  if(!found.length){toast('查不到基準價，請稍後再試。');return 0;}
+  setState(await client.commit({kind:'backfillBenchmarks',rows:found}));render();toast('已回補 '+found.length+' 筆入出金 0050 基準價');return found.length;
+ }finally{if(button?.isConnected){button.disabled=false;button.textContent='補齊基準價';}}
+}
+function download(name,type,text){const url=URL.createObjectURL(new Blob([text],{type}));const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+function exportPdf(){const {model,html}=client.reportPdf(state.account),w=window.open('','_blank');
+ if(!w){download('jackstock-report-'+model.reportDate+'.html','text/html;charset=utf-8',html);return toast('瀏覽器擋住新視窗，已改下載 HTML，開啟後可列印成 PDF');}
+ w.document.open();w.document.write(html);w.document.close();w.focus();w.setTimeout(()=>w.print(),600);toast('報告已開啟，列印時選「儲存為 PDF」');}
+function exportXls(){download('stock-ledger-'+today()+'.xls','application/vnd.ms-excel;charset=utf-8',client.reportXls(state.account));toast('Excel 檔已匯出');}
+function emailReport(){const r=client.report(state.account);if(r.empty)return toast(r.empty);const m=r.model,to=state.user.email||'';
+ const body=['Jackstock '+m.portfolioName+' 交易報告','報告日期：'+m.reportDate,'當日交易：'+fmt(m.dayTransactions.length)+' 筆','當日已實現淨利：'+money(m.daySummary.net),m.reportMonth+' 月累計淨利：'+money(m.monthSummary.net),m.reportYear+' 年累計淨利：'+money(m.yearSummary.net),'目前持股：'+fmt(m.inventoryShares)+' 股','現金餘額：'+money(m.metrics.cash),'帳面資產：'+money(m.assetSeries.at(-1)?.assets||0),'','PDF 附件：請在報表頁點「匯出 PDF」後儲存，再手動附上。'].join('\n');
+ window.location.href='mailto:'+encodeURIComponent(to)+'?subject='+encodeURIComponent('Jackstock '+m.reportDate+' 交易報告摘要')+'&body='+encodeURIComponent(body);}
+// JSON backup: the same stockbook-backup-v2 file A downloads and restores, so either version can read the other's.
+async function downloadBackup(source='LOCAL_EXPORT'){const env=await client.backup(source);download('stockbook_backup_'+new Date().toISOString().slice(0,10)+(source==='PRE_RESTORE'?'_before_restore':'')+'.json','application/json',JSON.stringify(env,null,2));return env;}
+let pendingRestore=null,driveStatus=null;
+function backupSheet(){
+ const d=driveStatus,drive=d?(d.connected?defs([['Google Drive',esc(d.connectedEmail||'已連結')],['每日備份',d.enabled?'開啟':'停止'],['上次備份',esc(d.lastBackupAt?stamp(d.lastBackupAt):'尚未備份')],['狀態',esc(d.lastStatus||'—')]])+'<div class="cash-row"><button data-drive-run>立即備份</button><button data-drive-folder '+(d.folderId?'':'disabled')+'>開啟資料夾</button><button data-drive-disconnect>解除連結</button></div>':'<p class="hint">尚未連結 Google Drive。連結後每天自動備份到你的 Drive（沿用 A 版的雲端備份服務）。</p><button class="secondary wide" data-drive-connect>連結 Google Drive</button>'):'<p class="hint" id="drive-loading">正在讀取 Google Drive 備份狀態…</p>';
+ sheet('資料備份','<p class="eyebrow sheet-eyebrow">JSON 備份</p><p class="hint">格式和 A 版的備份檔相同（含 SHA-256 驗證碼），A、B 可以互相還原。</p><div class="sheet-actions"><button class="secondary" data-backup-download>下載備份</button><button class="secondary" data-backup-restore>從備份還原</button></div><input type="file" id="restore-file" accept=".json,application/json" hidden>'
+ +'<p class="eyebrow sheet-eyebrow" style="margin-top:22px">Google Drive 自動備份</p><div id="drive-box">'+drive+'</div>');
+ if(!d)client.driveStatus().then(s=>{driveStatus=s;if($('#drive-box'))backupSheet();}).catch(e=>{const box=$('#drive-box');if(box)box.innerHTML='<div class="error">無法讀取 Google Drive 備份狀態：'+esc(errorText(e))+'</div><button class="secondary wide" data-drive-connect>連結 Google Drive</button>';});
+}
+async function chooseRestore(file){
+ const text=await file.text(),info=await client.readBackup(text);pendingRestore=info;
+ sheet('從備份還原','<p class="notice">這會用備份檔的內容取代目前這份帳本（A、B 共用的正式資料）。還原前會先下載一份目前資料的安全備份。</p>'+defs([['備份時間',esc(info.createdAt?stamp(info.createdAt):'—')],['來源',esc(info.source||'舊版格式')],['目前資料筆數',fmt(info.current)],['備份資料筆數',fmt(info.incoming)]])+(info.incoming<info.current?'<div class="alert">備份的資料比目前少，還原後較新的紀錄會消失。</div>':'')+'<div class="sheet-actions"><button class="secondary" data-close>取消</button><button class="danger" data-confirm-restore>下載安全備份並還原</button></div>');
+}
+
 const BROKER_CHOICES=[['broker-cathay','國泰證券'],['broker-yuanta','元大證券'],['broker-fubon','富邦證券'],['broker-sino','永豐金證券'],['broker-kgi','凱基證券'],['broker-capital','群益證券'],['broker-other','其他']];
 // A new ledger in Firestore can't be read before it exists, so a denied read also offers creation; the client refuses to overwrite.
 function missingLedger(e){const c=String(e?.code||'');return c==='stockbook/no-ledger'||c.includes('permission-denied');}
@@ -334,10 +415,24 @@ async function click(b){
  if(b.dataset.reconReview)return reconReview(b.dataset.reconReview);
  if(b.dataset.acceptRecon){b.disabled=true;try{setState(await client.commit({kind:'acceptReconciliation',key:b.dataset.acceptRecon}));closeSheet(false);render();toast('已儲存對帳接受紀錄');}finally{if(b.isConnected)b.disabled=false;}return;}
  if(b.hasAttribute('data-report'))return report();
+ if(b.dataset.reportTab){reportTab=b.dataset.reportTab;return render();}
+ if(b.hasAttribute('data-backfill'))return backfillBenchmarks(b);
+ if(b.hasAttribute('data-export-pdf'))return exportPdf();
+ if(b.hasAttribute('data-export-xls'))return exportXls();
+ if(b.hasAttribute('data-email-report'))return emailReport();
+ if(b.hasAttribute('data-backups')){driveStatus=null;return backupSheet();}
+ if(b.hasAttribute('data-backup-download')){b.disabled=true;try{await downloadBackup();toast('已下載可驗證的 JSON 備份檔');}finally{if(b.isConnected)b.disabled=false;}return;}
+ if(b.hasAttribute('data-backup-restore')){const input=$('#restore-file');if(input){input.value='';input.click();}return;}
+ if(b.hasAttribute('data-confirm-restore')){const info=pendingRestore;if(!info)return;b.disabled=true;b.textContent='正在還原…';try{await downloadBackup('PRE_RESTORE');setState(await client.commit({kind:'restoreBackup',state:info.state,createdAt:info.createdAt,source:info.source}));pendingRestore=null;closeSheet(false);render();toast('已建立安全備份並完成還原');}finally{if(b.isConnected){b.disabled=false;b.textContent='下載安全備份並還原';}}return;}
+ if(b.hasAttribute('data-drive-connect')){b.disabled=true;try{const r=await client.driveConnect();if(!r?.url)throw new Error('無法建立 Google Drive 授權連結。');const w=window.open(r.url,'_blank');if(!w)window.location.assign(r.url);else{w.opener=null;driveStatus=null;closeSheet(false);toast('請在新視窗完成授權，回來後再開啟「資料備份」確認');}}finally{if(b.isConnected)b.disabled=false;}return;}
+ if(b.hasAttribute('data-drive-run')){b.disabled=true;b.textContent='正在備份…';try{const r=await client.driveRunNow();driveStatus=await client.driveStatus();backupSheet();toast('Google Drive 備份完成'+(r?.fileName?'：'+r.fileName:''));}finally{if(b.isConnected){b.disabled=false;b.textContent='立即備份';}}return;}
+ if(b.hasAttribute('data-drive-folder')){if(driveStatus?.folderId)window.open('https://drive.google.com/drive/folders/'+encodeURIComponent(driveStatus.folderId),'_blank','noopener');return;}
+ if(b.hasAttribute('data-drive-disconnect'))return sheet('解除 Google Drive 連結','<p class="notice">解除後每日自動備份會停止，已經在 Drive 的備份檔不會刪除。</p><div class="sheet-actions"><button class="secondary" data-backups>取消</button><button class="danger" data-confirm-drive-disconnect>解除連結</button></div>');
+ if(b.hasAttribute('data-confirm-drive-disconnect')){b.disabled=true;try{await client.driveDisconnect();driveStatus=null;backupSheet();toast('已解除 Google Drive 連結');}finally{if(b.isConnected)b.disabled=false;}return;}
  if(b.hasAttribute('data-cash'))return sheet('現金餘額','<dl class="definition">'+accounts.filter(a=>a.id!=='all').map(a=>'<div><dt>'+esc(a.full)+'</dt><dd>'+money(state.cash[a.id]||0)+'</dd></div>').join('')+'</dl><div class="cash-row"><button data-new-cash="deposit">入金</button><button data-new-cash="withdraw">出金</button><button data-new-cash="dividend">股息／利息</button></div>');
  if(b.hasAttribute('data-reload'))return reload();
  if(b.hasAttribute('data-backup'))return sheet('連線與儲存狀態','<dl class="definition"><div><dt>Google 帳號</dt><dd>'+esc(state.user.email)+'</dd></div><div><dt>雲端帳本</dt><dd>'+esc(client.namespace)+'</dd></div><div><dt>上次載入／儲存</dt><dd>'+esc(stamp(state.updatedAt))+'</dd></div><div><dt>資料寫入</dt><dd>A、B 共用正式資料</dd></div></dl><button class="primary wide" data-reload>重新載入最新資料</button>');
- if(b.hasAttribute('data-original'))return sheet('原本的完整功能','<p class="notice">CSV 匯入、完整報表與匯出、備份，目前請在 A 版操作；之後的階段會陸續補進 B 版。</p><a class="primary wide" style="display:block;text-align:center;text-decoration:none" href="https://jackstock-ed2d2.web.app" target="_blank" rel="noopener">開啟 A 版</a>');
+ if(b.hasAttribute('data-original'))return sheet('原本的完整功能','<p class="notice">A 版的功能都已經可以在 B 版使用。切換完成前 A 版仍可開啟；請不要同時在 A、B 修改。</p><a class="primary wide" style="display:block;text-align:center;text-decoration:none" href="https://jackstock-ed2d2.web.app" target="_blank" rel="noopener">開啟 A 版</a>');
  if(b.hasAttribute('data-logout'))return client.signOut();
  if(b.dataset.edit){const t=state.trades.find(x=>x.id===b.dataset.edit);return t.cash?cashForm(t.type,t.id):form(t.type,t.code,t.id);}
  if(b.dataset.newCash)return cashForm(b.dataset.newCash);
@@ -383,7 +478,7 @@ function renderTradeResults(){const box=$('#trade-results');if(box)box.innerHTML
 document.addEventListener('compositionstart',e=>{if(e.target.id==='trade-search')composing=true;});
 document.addEventListener('compositionend',e=>{if(e.target.id==='trade-search'){composing=false;query=e.target.value;renderTradeResults();}});
 document.addEventListener('input',e=>{if(e.target.id==='trade-search'){if(composing||e.isComposing)return;query=e.target.value;return renderTradeResults();}if(e.target.closest('#exchange-form'))return updateExchangePreview();if(e.target.closest('#trade-form'))updateEstimate(['f-date','f-account'].includes(e.target.id));});
-document.addEventListener('change',e=>{if(e.target.id==='c-account')updateCashHint();if(e.target.id==='fe-broker')return feesSheet(e.target.value);
+document.addEventListener('change',e=>{if(e.target.id==='c-account')updateCashHint();if(e.target.id==='restore-file'&&e.target.files[0])return chooseRestore(e.target.files[0]).catch(error=>toast('無法還原：'+errorText(error)));if(e.target.id==='fe-broker')return feesSheet(e.target.value);
  const x=e.target.closest('#exchange-form');if(x){if(e.target.id==='x-source')return exchangeSheet(x.dataset.code,exchangeFields(x));return updateExchangePreview();}
  const f=e.target.closest('#trade-form');if(!f)return;
  if(e.target.id==='f-borrow')return form('sell','','',{...formSnapshot(f),borrow:e.target.checked?'sell':'',fee:'',tax:''});

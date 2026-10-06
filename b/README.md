@@ -38,3 +38,11 @@
 - 匯入紀錄：可刪除批次，範圍同 A（CSV 刪券商成交；JSON 連同建立的交易），並清掉相關的「採用券商金額」紀錄。被其他交易引用時拒絕。
 - 匯入模板：新增、刪除（預設國泰模板不可刪）。和 A 一樣，匯入目前依國泰欄位判讀。
 - 對帳：全部採用券商金額；帳本缺少紀錄可依券商成交補記；其他差異可直接開啟帳本那筆交易修改。重新對帳＝重新載入後重算。
+
+## 第 5 階段（報表、備份與資料安全）
+
+- 報表頁（更多 → 報表與匯出）：總覽、0050 基準、損益、庫存風險、現金流、交易品質，數字直接來自 A 的 `buildPdfReportModel` 等報表函式，可依帳戶篩選。
+- 入出金缺 0050 基準價時顯示「補齊基準價」（A 的 `backfillMissingBenchmarkPrices`）。A 會在匯出前自動補；B 改成按鈕，因為會寫入共用帳本。
+- 匯出 PDF（A 的 `buildPrettyPdfReportHtml`，開新視窗列印；被擋時改下載 HTML）、匯出 Excel（同 A 的 .xls）、Email 摘要（mailto，內容同 A）。
+- JSON 備份：下載與還原都用 A 的 `stockbook-backup-v2` 格式與 SHA-256 驗證，A、B 互通。還原前先下載目前資料的安全備份，再以 A 的 `mergeCurrentUserState` 取代帳本內容；驗證失敗的檔案拒絕。
+- Google Drive 備份：呼叫現有的 Cloud Functions（`getBackupStatus`、`startDriveAuthorization`、`runBackupNow`、`disconnectDrive`，asia-east1），函式本身不改。

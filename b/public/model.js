@@ -1,4 +1,4 @@
-import { evaluateLedger, mobileInventory, mobileAmounts, mobileBasis, mobileSellOptions, mobileCosts, acceptanceKey, mobileNormalizeTransaction, mobileSettings, mobileBorrowOptions, mobileValidateBorrow, mobileExchangeLots, mobileExchangeEligible, mobileExchangePlan, mobileAssetType, mobileImport, mobileClearAcceptedDiffs } from './legacy-engine.js';
+import { evaluateLedger, mobileInventory, mobileAmounts, mobileBasis, mobileSellOptions, mobileCosts, acceptanceKey, mobileNormalizeTransaction, mobileSettings, mobileBorrowOptions, mobileValidateBorrow, mobileExchangeLots, mobileExchangeEligible, mobileExchangePlan, mobileAssetType, mobileImport, mobileClearAcceptedDiffs, mobileReport, mobileReportPdfHtml, mobileReportXls, mobileRestore, mobileContentCount } from './legacy-engine.js';
 export function taipeiToday(now=new Date()){return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(now);}
 function num(v){return Number(v)||0;}
 const clone=x=>structuredClone(x);
@@ -106,6 +106,16 @@ function benchmarkFields(b){
  if(!b||!(num(b.benchmarkPrice)>0))return {};
  return Object.fromEntries(BENCHMARK_KEYS.map(k=>[k,k==='benchmarkPrice'?Math.round(num(b[k])*100)/100:String(b[k]||'')]));
 }
+// A's 報表頁 for one portfolio and account ('all' = every account).
+export function reportView(raw,identity,portfolioId,account='all'){return mobileReport(raw,identity,portfolioId,account==='all'?'ALL':account);}
+export function reportPdf(raw,identity,portfolioId,account='all'){return mobileReportPdfHtml(raw,identity,portfolioId,account==='all'?'ALL':account);}
+export function reportXls(raw,identity,portfolioId,account='all'){return mobileReportXls(raw,identity,portfolioId,account==='all'?'ALL':account);}
+// Deposits and withdrawals still missing a 0050 benchmark price (A fills these before every report export).
+export function missingBenchmarks(raw,identity,portfolioId,account='all'){
+ const {data,portfolioId:pid}=evaluateLedger(raw,identity,portfolioId);
+ return data.appTransactions.filter(t=>t.portfolioId===pid&&['DEPOSIT','WITHDRAW'].includes(t.transactionType)&&(account==='all'||t.brokerAccountId===account)&&!(num(t.benchmarkPrice)>0)).map(t=>({id:t.id,date:t.tradeDate}));
+}
+export function contentCount(data){return mobileContentCount(data);}
 export function buildOperation(raw,identity,portfolioId,op){
  const {data,user,portfolioId:pid}=evaluateLedger(raw,identity,portfolioId);
  if(!canWrite(data,user,pid))throw new Error('這份投資帳本沒有編輯權限。');
@@ -275,6 +285,24 @@ export function buildOperation(raw,identity,portfolioId,op){
   next.importBatches=next.importBatches.filter(b=>b.id!==batch.id);next.rawImportRows=(next.rawImportRows||[]).filter(r=>r.importBatchId!==batch.id);next.brokerExecutions=(next.brokerExecutions||[]).filter(x=>x.importBatchId!==batch.id);
   if(txIds.size){next.appTransactions=next.appTransactions.filter(t=>!txIds.has(t.id));next.manualClosedRebuySellIds=(next.manualClosedRebuySellIds||[]).filter(id=>!txIds.has(id));}
   action='DELETE';entityType='import_batch';entityId=batch.id;after={sourceType:batch.sourceType,brokerExecutionCount:execIds.size,appTransactionCount:txIds.size,rawRowCount:rows.length};
+ }else if(op.kind==='backfillBenchmarks'){
+  // A's backfillMissingBenchmarkPrices: only deposits and withdrawals without a price, and only when the lookup found one.
+  const rows=(Array.isArray(op.rows)?op.rows:[]).map(r=>({id:r.id,fields:benchmarkFields(r.fields)})).filter(r=>Object.keys(r.fields).length);
+  if(!rows.length)throw new Error('查不到 0050 基準價，這次沒有回補。');
+  const ids=new Set();
+  for(const r of rows){
+   const t=next.appTransactions.find(x=>x.id===r.id&&x.portfolioId===pid);
+   if(!t||!['DEPOSIT','WITHDRAW'].includes(t.transactionType)||num(t.benchmarkPrice)>0)throw new Error('入出金紀錄已改變，請重新載入。');
+   Object.assign(t,r.fields,{updatedAt:now});ids.add(t.id);
+  }
+  action='BACKFILL_BENCHMARK';entityId=[...ids].join(',');after={count:ids.size};
+ }else if(op.kind==='restoreBackup'){
+  // A's 匯入備份: the file's data replaces this user's ledger (checksum checked before this point; a safety backup is downloaded first).
+  if(!op.state||typeof op.state!=='object'||!Array.isArray(op.state.appTransactions))throw new Error('備份檔內容不正確。');
+  const restored=mobileRestore(raw,identity,pid,clone(op.state));
+  Object.assign(next,clone(restored));
+  before={count:mobileContentCount(raw)};after={count:mobileContentCount(restored),createdAt:String(op.createdAt||''),source:String(op.source||'')};
+  action='RESTORE_BACKUP';entityType='ledger';entityId=pid;
  }else if(op.kind==='createTemplate'||op.kind==='deleteTemplate'){
   next.importTemplates=Array.isArray(next.importTemplates)?next.importTemplates:clone(data.importTemplates||[]);
   entityType='broker_import_template';
@@ -430,7 +458,7 @@ export function buildOperation(raw,identity,portfolioId,op){
  const candidate=evaluateLedger(next,identity,pid).data;
  // Editing amounts recomputes matching (as in A), but never leaves another sell without the inventory it had.
  const matched=(d,id)=>d.sellMatches.filter(m=>m.sellTransactionId===id).reduce((s,m)=>s+num(m.matchedShares),0);
- for(const tx of data.appTransactions.filter(t=>t.transactionType==='SELL'&&!t.borrowRebuyType&&t.id!==op.id)){
+ if(op.kind!=='restoreBackup')for(const tx of data.appTransactions.filter(t=>t.transactionType==='SELL'&&!t.borrowRebuyType&&t.id!==op.id)){
   if(matched(candidate,tx.id)<matched(data,tx.id))throw new Error('修改後，'+tx.tradeDate+' 的賣出會配不到足夠庫存。請先調整那筆賣出，或在 A 版處理。');
  }
  return next;

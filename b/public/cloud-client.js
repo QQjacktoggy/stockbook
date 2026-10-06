@@ -1,4 +1,5 @@
-import { projectLedger, buildOperation, estimateCosts, sellOptions, borrowOptions, exchangePreview, starterLedger } from './model.js';
+import { projectLedger, buildOperation, estimateCosts, sellOptions, borrowOptions, exchangePreview, starterLedger, reportView, reportPdf, reportXls, missingBenchmarks, contentCount } from './model.js';
+import { mobileBackupEnvelope, mobileParseBackup } from './legacy-engine.js';
 import {createNativeAuth,nativeAuthError} from './native-auth.js';
 const SDK='https://www.gstatic.com/firebasejs/10.12.5/';
 export function namespaceFor(email,custom=''){const value=String(custom||String(email||'').toLowerCase()).trim().replace(/[^a-zA-Z0-9._-]/g,'_');if(!value)throw new Error('找不到帳本名稱。');return value;}
@@ -24,7 +25,7 @@ export function errorText(error){
  if(code.includes('network-request-failed')||code.includes('unavailable'))return '連線失敗，無法確認操作是否完成。請重新載入並檢查這筆交易後再操作。';
  return error?.message||'操作失敗，請重試。';
 }
-export async function createLedgerClient(config,{sdk:injected=null,onAuthChange=()=>{}}={}){
+export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=null,onAuthChange=()=>{}}={}){
  const [appModule,authModule,firestoreModule]=injected||await Promise.all([import(SDK+'firebase-app.js'),import(SDK+'firebase-auth.js'),import(SDK+'firebase-firestore.js')]);
  const app=appModule.initializeApp(config,'stockbook-mobile-b'),auth=authModule.getAuth(app),db=firestoreModule.getFirestore(app);
  let baseline=null,raw=null,model=null,customNamespace='',busy=false,epoch=0,emailLoginPending=false;
@@ -103,6 +104,14 @@ export async function createLedgerClient(config,{sdk:injected=null,onAuthChange=
    return model;
   }finally{busy=false;}
  }
+ // Google Drive backup uses A's existing Cloud Functions (asia-east1); the functions themselves are unchanged.
+ let functions=null;
+ async function callFunction(name,data={}){
+  identity();
+  if(!functions){const mod=functionsSdk||await import(SDK+'firebase-functions.js');functions={mod,instance:mod.getFunctions(app,'asia-east1')};}
+  return (await functions.mod.httpsCallable(functions.instance,name)(data)).data;
+ }
+ function loaded(){if(!raw||!model)throw new Error('請先載入帳本。');return identity();}
  const client={
   nativeAuth,
   async signInPassword(email,password){
@@ -120,6 +129,16 @@ export async function createLedgerClient(config,{sdk:injected=null,onAuthChange=
   sellOptions(fields){if(!raw||!model)return [];return sellOptions(raw,identity(),model.portfolioId,fields);},
   borrowOptions(fields){if(!raw||!model)return [];return borrowOptions(raw,identity(),model.portfolioId,fields);},
   exchangePreview(fields){if(!raw||!model)throw new Error('請先載入帳本。');return exchangePreview(raw,identity(),model.portfolioId,fields);},
+  report(account=model?.account||'all'){const who=loaded();return reportView(raw,who,model.portfolioId,account);},
+  reportPdf(account=model?.account||'all'){const who=loaded();return reportPdf(raw,who,model.portfolioId,account);},
+  reportXls(account=model?.account||'all'){const who=loaded();return reportXls(raw,who,model.portfolioId,account);},
+  missingBenchmarks(account=model?.account||'all'){const who=loaded();return missingBenchmarks(raw,who,model.portfolioId,account);},
+  backup(source='LOCAL_EXPORT'){const who=loaded();return mobileBackupEnvelope(raw,who,model.portfolioId,source);},
+  async readBackup(text){let parsed;try{parsed=JSON.parse(text);}catch{throw new Error('備份檔不是有效的 JSON。');}const state=await mobileParseBackup(parsed);if(!state||typeof state!=='object'||!Array.isArray(state.appTransactions))throw new Error('備份檔缺少交易資料。');return {state,createdAt:parsed.createdAt||'',source:parsed.source||'',incoming:contentCount(state),current:contentCount(raw)};},
+  driveStatus(){return callFunction('getBackupStatus');},
+  driveConnect(){return callFunction('startDriveAuthorization',{namespace:baseline?.ns||namespaceFor(identity().email,customNamespace)});},
+  driveRunNow(){return callFunction('runBackupNow');},
+  driveDisconnect(){return callFunction('disconnectDrive');},
   get user(){return auth.currentUser;},get namespace(){return baseline?.ns||'';},get busy(){return busy;}
  };
  function publishAuth(user){epoch++;baseline=null;raw=null;model=null;onAuthChange(user,client);}

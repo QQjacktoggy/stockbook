@@ -2,7 +2,8 @@ import test from 'node:test';
 // Core transaction and SDK boundary tests use synthetic fixtures only.
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {projectLedger,buildOperation,sellOptions,borrowOptions,exchangePreview,estimateCosts,starterLedger,taipeiToday,minimalLots,CATEGORIES} from '../public/model.js';
+import {projectLedger,buildOperation,sellOptions,borrowOptions,exchangePreview,estimateCosts,starterLedger,taipeiToday,minimalLots,CATEGORIES,reportView,reportPdf,reportXls,missingBenchmarks,contentCount} from '../public/model.js';
+import {mobileBackupEnvelope,mobileParseBackup} from '../public/legacy-engine.js';
 import {fetchQuote,benchmarkFor,yahooSymbolFor} from '../public/quotes.js';
 import {createLedgerClient,namespaceFor,compressLedger,decodeLedger} from '../public/cloud-client.js';
 const original=JSON.parse(readFileSync(new URL('./fixture.json',import.meta.url)));
@@ -410,4 +411,40 @@ test('Import templates can be added and removed; the default stays',()=>{
  const t=projectLedger(next,who,pid).templates.find(x=>x.name==='富邦 CSV');assert.equal(t.mapping.tradeDate,'成交日');
  assert.throws(()=>buildOperation(next,who,pid,{kind:'deleteTemplate',id:'tpl-cathay-default'}),/不能刪除/);
  assert.equal(projectLedger(buildOperation(next,who,pid,{kind:'deleteTemplate',id:t.id}),who,pid).templates.some(x=>x.id===t.id),false);
+});
+test('Reports use A\'s report model: 0050 benchmark, P&L, PDF and Excel documents',()=>{
+ const raw=fixture(),before=JSON.stringify(raw),r=reportView(raw,who,pid);
+ assert.ok(!r.empty,r.empty);assert.ok(r.model.reportDate);assert.ok(r.model.benchmark);assert.ok(Array.isArray(r.insights)&&r.insights.length);
+ assert.equal(typeof r.quality.winRate,'number');assert.equal(typeof r.cashflow.totalAssets,'number');
+ const pdf=reportPdf(raw,who,pid);assert.match(pdf.html,/<html/i);assert.ok(pdf.html.includes(pdf.model.reportDate));
+ assert.match(reportXls(raw,who,pid),/0050 操作績效追蹤/);
+ const one=reportView(raw,who,pid,'review-a');assert.ok(one.empty||one.model.transactions.every(t=>t.brokerAccountId==='review-a'));
+ assert.equal(JSON.stringify(raw),before,'Reports must not mutate the ledger');
+ assert.ok(reportView(starterLedger(who),who,'').empty,'An empty ledger reports that there is no data');
+});
+test('Backfills missing 0050 benchmark prices on deposits and withdrawals only',()=>{
+ const raw=fixture();raw.appTransactions.filter(t=>['DEPOSIT','WITHDRAW'].includes(t.transactionType)).forEach(t=>{delete t.benchmarkPrice;});
+ const missing=missingBenchmarks(raw,who,pid);assert.ok(missing.length>0);
+ const b={benchmarkSecurityId:'sec-0050',benchmarkSymbol:'0050',benchmarkPrice:101.234,benchmarkPriceSource:'TEST',benchmarkPriceDate:'2026-01-02',benchmarkPriceCapturedAt:'2026-01-02T00:00:00Z'};
+ const next=buildOperation(raw,who,pid,{kind:'backfillBenchmarks',rows:missing.map(m=>({id:m.id,fields:b}))});
+ assert.equal(missingBenchmarks(next,who,pid).length,0);assert.equal(next.appTransactions.find(t=>t.id===missing[0].id).benchmarkPrice,101.23);
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'backfillBenchmarks',rows:missing.map(m=>({id:m.id,fields:b}))}),/已改變/);
+ const buy=raw.appTransactions.find(t=>t.transactionType==='BUY');
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'backfillBenchmarks',rows:[{id:buy.id,fields:b}]}),/已改變/);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'backfillBenchmarks',rows:[{id:missing[0].id,fields:{}}]}),/查不到/);
+});
+test('JSON backup uses A\'s stockbook-backup-v2 format; restore replaces the ledger and rejects a damaged file',async()=>{
+ const raw=fixture(),env=await mobileBackupEnvelope(raw,who,pid);
+ assert.equal(env.format,'stockbook-backup-v2');assert.equal(env.schemaVersion,2);assert.equal(env.checksum.algorithm,'SHA-256');assert.match(env.checksum.value,/^[0-9a-f]{64}$/);
+ const state=await mobileParseBackup(JSON.parse(JSON.stringify(env)));assert.equal(state.appTransactions.length,raw.appTransactions.length);
+ const tampered=JSON.parse(JSON.stringify(env));tampered.state.appTransactions[0].price=999;
+ await assert.rejects(mobileParseBackup(tampered),/驗證失敗/);
+ // Change the ledger, then restore the earlier backup: the new trade disappears, and the restore is audited.
+ const changed=buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields()});
+ assert.equal(contentCount(changed),contentCount(raw)+1);
+ const restored=buildOperation(changed,who,pid,{kind:'restoreBackup',state,createdAt:env.createdAt,source:env.source});
+ assert.equal(restored.appTransactions.length,raw.appTransactions.length);
+ assert.equal(restored.auditLogs.at(-1).action,'RESTORE_BACKUP');assert.deepEqual(restored.extraUnknown,raw.extraUnknown);
+ assert.deepEqual(projectLedger(restored,who,pid).cash,projectLedger(raw,who,pid).cash);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'restoreBackup',state:{}}),/不正確/);
 });
