@@ -1,0 +1,26 @@
+{
+  "hosting": {
+    "site": "jackstock-ed2d2-b",
+    "public": "public",
+    "ignore": [
+      "firebase.b.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "headers": [
+      {
+        "source": "**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          },
+          {
+            "key": "X-Content-Type-Options",
+            "value": "nosniff"
+          }
+        ]
+      }
+    ]
+  }
+}
