@@ -1,4 +1,4 @@
-import { evaluateLedger, mobileInventory, mobileAmounts, mobileBasis, mobileSellOptions, mobileCosts, acceptanceKey, mobileNormalizeTransaction, mobileSettings, mobileBorrowOptions, mobileValidateBorrow, mobileExchangeLots, mobileExchangeEligible, mobileExchangePlan, mobileAssetType, mobileImport, mobileClearAcceptedDiffs, mobileReport, mobileReportPdfHtml, mobileReportXls, mobileRestore, mobileContentCount } from './legacy-engine.js';
+import {mobileExecutionChecksum, evaluateLedger, mobileInventory, mobileAmounts, mobileBasis, mobileSellOptions, mobileCosts, acceptanceKey, mobileNormalizeTransaction, mobileSettings, mobileBorrowOptions, mobileValidateBorrow, mobileExchangeLots, mobileExchangeEligible, mobileExchangePlan, mobileAssetType, mobileImport, mobileClearAcceptedDiffs, mobileReport, mobileReportPdfHtml, mobileReportXls, mobileRestore, mobileContentCount } from './legacy-engine.js';
 import { DEFAULT_FOLDER_ID } from './drive-import.js';
 export function taipeiToday(now=new Date()){return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(now);}
 function num(v){return Number(v)||0;}
@@ -124,11 +124,12 @@ export function missingBenchmarks(raw,identity,portfolioId,account='all'){
 }
 export function contentCount(data){return mobileContentCount(data);}
 // The same broker fill imported twice (e.g. one CSV loaded again after the import checksum format changed): same account, day, side,
-// stock, order number, execution number, shares, price and net amount. The earliest copy is kept; fills without an order number are never flagged.
+// stock, order number, execution number, shares, price and net amount, but from a different import batch (two equal fills in one file can be real).
+// The earliest copy is kept; fills without an order number are never flagged.
 function duplicateExecutions(data,pid){
  const seen=new Map(),extras=new Map();
  const rows=data.brokerExecutions.filter(x=>x.portfolioId===pid&&String(x.orderNo||'').trim()).sort((a,b)=>String(a.createdAt||'').localeCompare(String(b.createdAt||''))||String(a.id).localeCompare(String(b.id)));
- for(const x of rows){const sig=[x.brokerAccountId,x.tradeDate,x.side,x.securityId,String(x.orderNo).trim(),String(x.executionNo||'').trim(),num(x.shares),num(x.price),num(x.netAmount)].join('|');if(seen.has(sig))extras.set(x.id,seen.get(sig));else seen.set(sig,x.id);}
+ for(const x of rows){const sig=[x.brokerAccountId,x.tradeDate,x.side,x.securityId,String(x.orderNo).trim(),String(x.executionNo||'').trim(),num(x.shares),num(x.price),num(x.netAmount)].join('|');const first=seen.get(sig);if(!first)seen.set(sig,x);else if(String(first.importBatchId||'')!==String(x.importBatchId||''))extras.set(x.id,first.id);}
  return extras;
 }
 export function buildOperation(raw,identity,portfolioId,op){
@@ -322,7 +323,12 @@ export function buildOperation(raw,identity,portfolioId,op){
   const execIds=new Set(ids),removed=(next.brokerExecutions||[]).filter(x=>execIds.has(x.id));
   before={brokerExecutions:clone(removed),acceptedBrokerDiffs:clone(next.acceptedBrokerDiffs||{})};
   next.acceptedBrokerDiffs=mobileClearAcceptedDiffs(data,execIds,new Set());
-  next.brokerExecutions=(next.brokerExecutions||[]).filter(x=>!execIds.has(x.id));
+  // The kept copy gets today's checksum (as A's repairBrokerExecutionSecurityIds does), so importing the same CSV again is still caught as a duplicate.
+  // It is computed from the loaded record, whose stock A has already repaired from the security name.
+  const keep=new Set(ids.map(id=>extras.get(id))),loaded=new Map(data.brokerExecutions.map(x=>[x.id,x]));
+  next.brokerExecutions=(next.brokerExecutions||[]).filter(x=>!execIds.has(x.id)).map(x=>keep.has(x.id)?{...x,securityId:loaded.get(x.id).securityId,checksum:mobileExecutionChecksum(loaded.get(x.id)),updatedAt:now}:x);
+  const perBatch={};removed.forEach(x=>{perBatch[x.importBatchId]=(perBatch[x.importBatchId]||0)+1;});
+  next.importBatches=(next.importBatches||[]).map(b=>perBatch[b.id]?{...b,createdCount:Math.max(0,num(b.createdCount)-perBatch[b.id]),duplicateCount:num(b.duplicateCount)+perBatch[b.id]}:b);
   action='DELETE_DUPLICATE_BROKER_EXECUTIONS';entityType='broker_execution';entityId=ids.join(',');after={count:ids.length,kept:ids.map(id=>extras.get(id))};
  }else if(op.kind==='backfillBenchmarks'){
   // A's backfillMissingBenchmarkPrices: only deposits and withdrawals without a price, and only when the lookup found one.

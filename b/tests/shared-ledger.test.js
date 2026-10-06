@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {projectLedger,buildOperation,sellOptions,borrowOptions,exchangePreview,estimateCosts,starterLedger,taipeiToday,minimalLots,CATEGORIES,reportView,reportPdf,reportXls,missingBenchmarks,contentCount} from '../public/model.js';
-import {mobileBackupEnvelope,mobileParseBackup} from '../public/legacy-engine.js';
+import {mobileBackupEnvelope,mobileParseBackup,mobileExecutionChecksum} from '../public/legacy-engine.js';
 import {parseFolderId,latestByAccount,listCsvFiles,downloadCsv,decodeCsv,DRIVE_SCOPE} from '../public/drive-import.js';
 import {fetchQuote,benchmarkFor,yahooSymbolFor} from '../public/quotes.js';
 import {createLedgerClient,namespaceFor,compressLedger,decodeLedger} from '../public/cloud-client.js';
@@ -540,6 +540,11 @@ test('Flags a broker fill imported twice, shows the ledger amount, and removes o
  assert.deepEqual(next.brokerExecutions.map(x=>x.id),['broker-2026-09-29-BUY-A2817-1']);
  assert.equal(after.reconciliation.find(l=>l.tradeDate==='2026-09-29'&&l.side==='BUY').matchStatus,'MATCHED');
  assert.deepEqual(next.appTransactions,raw.appTransactions);assert.equal(next.auditLogs.at(-1).action,'DELETE_DUPLICATE_BROKER_EXECUTIONS');
+ // The kept copy carries today's checksum so the same CSV is still recognised later; the later batch's counts follow.
+ assert.equal(next.brokerExecutions[0].checksum,mobileExecutionChecksum(raw.brokerExecutions[0]));assert.notEqual(next.brokerExecutions[0].checksum,'890794548216');
+ assert.deepEqual(next.importBatches.filter(b=>b.id==='b2').map(b=>[b.createdCount,b.duplicateCount]),[[0,1]]);
+ // Two equal fills inside one import batch can be real (one order filled twice), so they are never flagged.
+ const same=structuredClone(raw);same.brokerExecutions[1].importBatchId='b1';assert.deepEqual(projectLedger(same,who,pid).reconciliation.flatMap(l=>l.duplicates),[]);
  // A different order number, or a fill without one, is never treated as a repeat.
  raw.brokerExecutions[1].orderNo='A2818';assert.deepEqual(projectLedger(raw,who,pid).reconciliation.flatMap(l=>l.duplicates),[]);
  raw.brokerExecutions.forEach(x=>x.orderNo='');assert.deepEqual(projectLedger(raw,who,pid).reconciliation.flatMap(l=>l.duplicates),[]);
