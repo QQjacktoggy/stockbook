@@ -1,6 +1,7 @@
 import {createLedgerClient,errorText} from './cloud-client.js';
 import {taipeiToday} from './model.js';
 import {fetchQuote,benchmarkFor} from './quotes.js';
+import {parseFolderId,defaultKeyword,latestByAccount,decodeCsv} from './drive-import.js';
 
 (function(){
 'use strict';
@@ -83,9 +84,9 @@ return '<div class="page-head"><h1>對帳</h1></div><div class="tabs"><button cl
 +'<div class="sheet-actions" style="margin-top:16px"><button class="primary" data-import>'+icon('cloud')+'匯入券商 CSV</button><button class="secondary" data-reload>'+icon('refresh')+'重新對帳</button></div><button class="link" style="margin-top:10px" data-batches>匯入紀錄與模板'+icon('arrow')+'</button>';}
 function acceptable(){return issues().filter(l=>['FEE_TAX_DIFF','AMOUNT_DIFF'].includes(l.matchStatus)&&l.brokerExecutionId&&!l.brokerAcceptedAt);}
 // A's 匯入: the 國泰 CSV (header row with 股名、日期、成交股數) or a JSON ledger; reconciliation reruns on save.
-function importSheet(){if(needAccounts())return;const acc=state.account!=='all'?state.account:accounts.find(a=>a.id!=='all').id;sheet('匯入券商紀錄','<form id="import-form"><div id="form-error" role="alert"></div><div class="form-field"><label for="i-account">券商帳戶</label>'+selectAccounts('account','i-account',acc)+'</div><div class="form-field"><label for="i-type">檔案類型</label><select id="i-type" name="sourceType"><option value="BROKER_CSV">券商對帳單 CSV（國泰格式）</option><option value="JSON_LEDGER">JSON 交易帳本</option></select></div><div class="form-field"><label for="i-file">檔案</label><input id="i-file" name="file" type="file" accept=".csv,.json,.txt,text/csv,application/json" required></div><p class="hint">和 A 版相同：券商 CSV 只會記錄成交明細並重新對帳，不會直接新增交易；重複的列會自動略過。JSON 帳本會新增交易。</p><div class="sticky-submit"><button class="primary wide" type="submit">開始匯入</button></div></form>');}
+function importSheet(){if(needAccounts())return;const acc=state.account!=='all'?state.account:accounts.find(a=>a.id!=='all').id;sheet('匯入券商紀錄',driveBox()+'<p class="eyebrow sheet-eyebrow">從這台裝置選檔案</p><form id="import-form"><div id="form-error" role="alert"></div><div class="form-field"><label for="i-account">券商帳戶</label>'+selectAccounts('account','i-account',acc)+'</div><div class="form-field"><label for="i-type">檔案類型</label><select id="i-type" name="sourceType"><option value="BROKER_CSV">券商對帳單 CSV（國泰格式）</option><option value="JSON_LEDGER">JSON 交易帳本</option></select></div><div class="form-field"><label for="i-file">檔案</label><input id="i-file" name="file" type="file" accept=".csv,.json,.txt,text/csv,application/json" required></div><p class="hint">和 A 版相同：券商 CSV 只會記錄成交明細並重新對帳，不會直接新增交易；重複的列會自動略過。JSON 帳本會新增交易。</p><div class="sticky-submit"><button class="primary wide" type="submit">開始匯入</button></div></form>');}
 // Broker CSVs are usually UTF-8; fall back to Big5 when the UTF-8 read has no CSV header and contains replacement characters.
-async function readImportFile(file){const buf=await file.arrayBuffer();let text=new TextDecoder('utf-8').decode(buf);if(!text.includes('股名')&&text.includes('\uFFFD')){try{text=new TextDecoder('big5').decode(buf);}catch{}}return text;}
+async function readImportFile(file){return decodeCsv(await file.arrayBuffer());}
 async function submitImport(f){if(!f.reportValidity())return;const file=f.elements.file.files[0];if(!file)return;const text=await readImportFile(file),before=state.reconciliation.filter(l=>!l.settled).length;
  submitForm(f,{kind:'importFile',account:f.elements.account.value,sourceType:f.elements.sourceType.value,text,filename:file.name},next=>{const b=next.batches[0],open=next.reconciliation.filter(l=>!l.settled).length;toast('匯入完成：新增 '+(b?.created||0)+' 筆'+(b?.duplicate?'，重複略過 '+b.duplicate+' 筆':'')+'；待確認差異 '+open+' 筆');if(open!==before){reconTab='open';go('reconcile');}});}
 function batchesSheet(){const list=state.batches;sheet('匯入紀錄','<div class="list">'+(list.length?list.map(b=>'<div class="menu-row"><span><strong>'+esc(b.filename||'(未命名)')+'</strong><small>'+esc([b.sourceType==='JSON_LEDGER'?'JSON 帳本':'券商 CSV',accountName(b.account),b.from?(b.from===b.to?slash(b.from):slash(b.from)+'～'+slash(b.to)):'','新增 '+b.created+(b.duplicate?' · 重複 '+b.duplicate:'')].filter(Boolean).join(' · '))+'</small></span><button class="link" data-delete-batch="'+esc(b.id)+'">刪除</button></div>').join(''):'<div class="empty">還沒有匯入紀錄</div>')+'</div>'
@@ -331,6 +332,27 @@ async function chooseRestore(file){
  sheet('從備份還原','<p class="notice">還原會用備份檔取代雲端上這個帳號的<b>全部資料</b>，包括其他投資帳本與設定，不只是目前這本（A、B 共用的正式資料）。請先下載目前資料的安全備份，確認檔案存好後再還原。</p>'+defs([['備份時間',esc(info.createdAt?stamp(info.createdAt):'—')],['來源',esc(info.source||'舊版格式')],['目前資料筆數',fmt(info.current)],['備份資料筆數',fmt(info.incoming)]])+(info.incoming<info.current?'<div class="alert">備份的資料比目前少，還原後較新的紀錄會消失。</div>':'')+'<button class="secondary wide" data-restore-safety>1. 下載目前資料的安全備份</button><label class="check-row" style="margin-top:12px"><input type="checkbox" id="restore-ok" disabled><span>我已確認安全備份檔存在這台裝置上</span></label><div class="sheet-actions"><button class="secondary" data-close>取消</button><button class="danger" data-confirm-restore disabled>2. 還原</button></div>');
 }
 
+// 對帳：從 Google Drive 指定資料夾，依檔名關鍵字（例如 jack、penny）找出每個帳戶最新的券商 CSV。
+let driveFound=null;
+function driveAccounts(){const saved=state.driveImport.keywords||{};return accounts.filter(a=>a.id!=='all').map(a=>({id:a.id,name:a.full,keyword:saved[a.id]??defaultKeyword(a.name)}));}
+function driveBox(){const d=state.driveImport;return '<p class="eyebrow sheet-eyebrow">Google Drive</p>'+(d.folderId?'<div class="sheet-actions" style="margin-top:6px"><button class="secondary" data-drive-find>找最新的 CSV</button><button class="secondary" data-drive-setup>資料夾與關鍵字</button></div><p class="hint">資料夾：'+esc(d.folderName||d.folderId)+'</p>':'<p class="hint">設定一個 Drive 資料夾後，B 會依檔名裡的關鍵字（例如 jack、penny）找出各帳戶最新的 CSV。</p><button class="secondary wide" data-drive-setup>設定 Drive 資料夾</button>')+'<div style="height:18px"></div>';}
+function driveSetupSheet(){const d=state.driveImport;sheet('Drive 資料夾與關鍵字','<form id="drive-setup-form"><div id="form-error" role="alert"></div><div class="form-field"><label for="dv-folder">Drive 資料夾連結</label><input id="dv-folder" name="folder" required placeholder="https://drive.google.com/drive/folders/…" value="'+esc(d.folderId?'https://drive.google.com/drive/folders/'+d.folderId:'')+'"></div><p class="eyebrow sheet-eyebrow">檔名關鍵字</p><p class="hint">檔名包含這個字（不分大小寫）的 CSV 會匯入到對應的帳戶。留空表示這個帳戶不從 Drive 匯入。</p>'+driveAccounts().map(a=>'<div class="form-field"><label for="dv-'+esc(a.id)+'">'+esc(a.name)+'</label><input id="dv-'+esc(a.id)+'" name="kw:'+esc(a.id)+'" value="'+esc(a.keyword)+'"></div>').join('')+'<p class="hint">儲存時會開啟 Google 視窗，請允許 B 版「查看 Google Drive 檔案」。B 只會讀取，不會修改 Drive。</p><div class="sticky-submit"><button class="primary wide" type="submit">儲存</button></div></form>');}
+async function submitDriveSetup(f){if(!f.reportValidity())return;const box=f.querySelector('#form-error'),folderId=parseFolderId(f.elements.folder.value);box.innerHTML='';
+ if(!folderId){box.innerHTML='<div class="error">看不懂這個連結。請在 Drive 打開資料夾，複製網址列的連結貼上。</div>';return;}
+ const keywords=Object.fromEntries(Array.from(f.querySelectorAll('[name^="kw:"]')).map(x=>[x.name.slice(3),x.value.trim()]));
+ let name='';try{name=await client.driveFolderName(folderId);}catch(e){if(f.isConnected){box.innerHTML='<div class="error">'+esc(errorText(e))+'</div>';}return;}
+ if(!f.isConnected)return;
+ submitForm(f,{kind:'saveDriveImport',fields:{folderId,folderName:name,keywords}},()=>{toast('已設定 Drive 資料夾：'+(name||folderId));importSheet();});}
+async function driveFind(b){b.disabled=true;b.textContent='正在讀取 Drive…';
+ try{const files=await client.driveFiles(state.driveImport.folderId),rows=latestByAccount(files,driveAccounts());driveFound=rows;driveFoundSheet(files.length);}
+ finally{if(b.isConnected){b.disabled=false;b.textContent='找最新的 CSV';}}}
+function driveFoundSheet(total){const rows=driveFound||[],ready=rows.filter(r=>r.file);
+ sheet('Drive 上最新的 CSV','<p class="hint">資料夾「'+esc(state.driveImport.folderName||state.driveImport.folderId)+'」共 '+total+' 個 CSV。每個帳戶取檔名含關鍵字、最新修改的一個。重複的成交列會自動略過。</p><div>'+rows.map(r=>{const done=r.file&&state.batches.some(x=>x.filename===r.file.name&&x.account===r.account);return '<div class="lot"><span><b>'+esc(accountName(r.account))+' · 「'+esc(r.keyword)+'」</b><small>'+(r.file?esc(r.file.name)+' · '+esc(stamp(r.file.modifiedTime))+(done?' · 已匯入過':''):'找不到檔名含這個關鍵字的 CSV')+'</small></span>'+(r.file?'<button class="link" data-drive-import="'+esc(r.account)+'">匯入</button>':'')+'</div>';}).join('')+'</div>'+(ready.length>1?'<button class="primary wide" style="margin-top:14px" data-drive-import-all>全部匯入（'+ready.length+' 個檔案）</button>':''));}
+async function driveImport(ids,b){const rows=(driveFound||[]).filter(r=>r.file&&ids.includes(r.account));if(!rows.length)return;b.disabled=true;const label=b.textContent;const before=state.reconciliation.filter(l=>!l.settled).length,done=[];
+ try{for(const r of rows){b.textContent='正在匯入 '+r.file.name+'…';const text=await client.driveDownload(r.file),next=await client.commit({kind:'importFile',account:r.account,sourceType:'BROKER_CSV',text,filename:r.file.name});setState(next);const x=next.batches[0];done.push(accountName(r.account)+' 新增 '+(x?.created||0)+(x?.duplicate?'、重複 '+x.duplicate:''));}}
+ finally{if(b.isConnected){b.disabled=false;b.textContent=label;}}
+ const open=state.reconciliation.filter(l=>!l.settled).length;closeSheet(false);reconTab='open';go('reconcile');toast('匯入完成：'+done.join('；')+'；待確認差異 '+open+' 筆'+(open!==before?'（原本 '+before+'）':''));}
+
 const BROKER_CHOICES=[['broker-cathay','國泰證券'],['broker-yuanta','元大證券'],['broker-fubon','富邦證券'],['broker-sino','永豐金證券'],['broker-kgi','凱基證券'],['broker-capital','群益證券'],['broker-other','其他']];
 // A new ledger in Firestore can't be read before it exists, so a denied read also offers creation; the client refuses to overwrite.
 function missingLedger(e){const c=String(e?.code||'');return c==='stockbook/no-ledger'||c.includes('permission-denied');}
@@ -447,6 +469,10 @@ async function click(b){
  if(b.hasAttribute('data-new-security')){const f=$('#trade-form');return securitySheet(f?{type:f.elements.type.value,...formSnapshot(f)}:null);}
  if(b.hasAttribute('data-stocks'))return stockListSheet();
  if(b.hasAttribute('data-import'))return importSheet();
+ if(b.hasAttribute('data-drive-setup'))return driveSetupSheet();
+ if(b.hasAttribute('data-drive-find'))return driveFind(b);
+ if(b.dataset.driveImport)return driveImport([b.dataset.driveImport],b);
+ if(b.hasAttribute('data-drive-import-all'))return driveImport((driveFound||[]).map(r=>r.account),b);
  if(b.hasAttribute('data-batches'))return batchesSheet();
  if(b.hasAttribute('data-new-template'))return templateForm();
  if(b.dataset.reconFill){const l=state.reconciliation.find(x=>x.key===b.dataset.reconFill);if(!l)return;return form(l.side==='SELL'?'sell':'buy',l.securityId,'',{account:l.brokerAccountId,code:l.securityId,date:l.tradeDate,qty:l.allocatedShares,price:l.price,fee:l.allocatedFee,tax:l.allocatedTax,note:'依券商對帳單補記'});}
@@ -492,6 +518,7 @@ document.addEventListener('submit',e=>{if(e.target.id==='email-login-form'){e.pr
  if(e.target.id==='match-form'){e.preventDefault();const f=e.target;submitForm(f,{kind:'updateMatch',id:f.dataset.id,sources:Array.from(f.querySelectorAll('[name="source"]:checked')).map(x=>x.value).join(','),shares:f.elements.shares.value},()=>toast('配對已更新並重算'));}
  if(e.target.id==='exchange-form'){e.preventDefault();const f=e.target;submitForm(f,{kind:'createCostExchange',fields:exchangeFields(f)},()=>toast('成本交換已儲存'));}
  if(e.target.id==='import-form'){e.preventDefault();submitImport(e.target);}
+ if(e.target.id==='drive-setup-form'){e.preventDefault();submitDriveSetup(e.target).catch(error=>toast(errorText(error)));}
  if(e.target.id==='template-form'){e.preventDefault();const f=e.target;submitForm(f,{kind:'createTemplate',fields:Object.fromEntries(new FormData(f))},()=>toast('匯入模板已新增'));}
  const formOps={'transfer-form':['upsertCashTransfer','現金轉帳已儲存'],'position-form':['upsertPositionTransfer','股票轉戶已儲存'],'portfolio-form':['upsertPortfolio','投資帳本已儲存'],'account-form':['upsertBrokerAccount','券商帳戶已儲存'],'fee-form':['saveBrokerFees','券商費率已儲存'],'settings-form':['saveSettings','帳本設定已儲存']}[e.target.id];
  if(formOps){e.preventDefault();const f=e.target,fields=Object.fromEntries(new FormData(f));if(f.id==='account-form'){fields.isDefault=!!f.elements.isDefault.checked;if(f.elements.active)fields.active=!!f.elements.active.checked;}submitForm(f,{kind:formOps[0],id:f.dataset.editId||undefined,fields},()=>toast(formOps[1]));}

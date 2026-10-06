@@ -54,3 +54,10 @@
 - 任何修改都不能讓券商帳戶現金變成負數；原本就是負數的帳戶不能再變更少。匯入與還原除外。
 - 第一次建帳本改用 Firestore REST commit 加上 `exists:false` 前置條件：只能新建，兩台裝置同時建立也不會互相覆蓋。
 - 還原前要先下載安全備份並勾選確認；畫面說明還原會取代這個帳號的全部資料，不只是目前的帳本。
+
+## 對帳：從 Google Drive 匯入最新 CSV
+
+- 對帳 → 匯入 → Google Drive：貼上 Drive 資料夾連結，並為每個券商帳戶設定檔名關鍵字（預設是帳戶名稱，例如 jack、penny；不分大小寫）。設定存在帳本的 `settings.driveImport[portfolioId]`，手機和電腦共用，A 版會原樣保留。
+- 「找最新的 CSV」：列出資料夾內的 CSV（也支援 Google 試算表，會匯出成 CSV），每個帳戶取檔名含自己關鍵字、最新修改的一個；同時含兩個帳戶關鍵字的檔案會略過。可以單筆或全部匯入，重複的成交列照常以 checksum 略過。
+- 授權：用 Firebase 的 Google 重新登入取得唯讀 Drive 權限（`drive.readonly`），存取權杖只放在記憶體、約 50 分鐘後重新要求。B 只讀取，不會修改 Drive；不需要雲端函式。
+- 需要 Firebase 專案（Google Cloud）已啟用 Google Drive API；沒啟用時畫面會直接說明。
