@@ -1,5 +1,6 @@
 import { projectLedger, buildOperation, estimateCosts, sellOptions, borrowOptions, exchangePreview, starterLedger, reportView, reportPdf, reportXls, missingBenchmarks, contentCount } from './model.js';
 import { mobileBackupEnvelope, mobileParseBackup } from './legacy-engine.js';
+import { DRIVE_SCOPE, listCsvFiles, downloadCsv, folderName } from './drive-import.js';
 import {createNativeAuth,nativeAuthError} from './native-auth.js';
 const SDK='https://www.gstatic.com/firebasejs/10.12.5/';
 export function namespaceFor(email,custom=''){const value=String(custom||String(email||'').toLowerCase()).trim().replace(/[^a-zA-Z0-9._-]/g,'_');if(!value)throw new Error('找不到帳本名稱。');return value;}
@@ -120,6 +121,19 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
   if(!functions){const mod=functionsSdk||await import(SDK+'firebase-functions.js');functions={mod,instance:mod.getFunctions(app,'asia-east1')};}
   return (await functions.mod.httpsCallable(functions.instance,name)(data)).data;
  }
+ // Drive import reads the person's own Drive with a short-lived Google access token from a Google re-sign-in (read-only scope).
+ let driveAccess=null;
+ async function driveToken(force=false){
+  const user=auth.currentUser;identity();
+  if(!force&&driveAccess&&driveAccess.uid===user.uid&&driveAccess.expires>Date.now())return driveAccess.token;
+  const provider=new authModule.GoogleAuthProvider();provider.addScope(DRIVE_SCOPE);provider.setCustomParameters({login_hint:user.email});
+  const result=await authModule.reauthenticateWithPopup(user,provider);
+  if(result.user.uid!==user.uid)throw Object.assign(new Error('請用同一個 Google 帳號授權。'),{code:'auth/user-mismatch'});
+  const token=authModule.GoogleAuthProvider.credentialFromResult(result)?.accessToken;
+  if(!token)throw Object.assign(new Error('Google 沒有提供 Drive 授權，請再試一次並允許讀取 Drive。'),{code:'drive/no-token'});
+  driveAccess={uid:user.uid,token,expires:Date.now()+50*60*1000};return token;
+ }
+ async function withDrive(run){try{return await run(await driveToken());}catch(error){if(error?.code!=='drive/unauthorized')throw error;return run(await driveToken(true));}}
  function loaded(){if(!raw||!model)throw new Error('請先載入帳本。');return identity();}
  const client={
   nativeAuth,
@@ -130,7 +144,7 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
    finally{emailLoginPending=false;publishAuth(auth.currentUser);}
   },
   async signIn(redirect=false){const provider=new authModule.GoogleAuthProvider();provider.setCustomParameters({prompt:'select_account'});if(redirect)return authModule.signInWithRedirect(auth,provider);return authModule.signInWithPopup(auth,provider);},
-  async signOut(){epoch++;baseline=null;raw=null;model=null;return authModule.signOut(auth);},
+  async signOut(){epoch++;driveAccess=null;baseline=null;raw=null;model=null;return authModule.signOut(auth);},
   reload,commit,createLedger,
   view(){return model;},
   select(portfolioId,account='all'){if(!raw)throw new Error('請先載入帳本。');model=projectLedger(raw,identity(),portfolioId,account);model.updatedAt=baseline?.main.updatedAt||'';return model;},
@@ -144,13 +158,16 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
   missingBenchmarks(account=model?.account||'all'){const who=loaded();return missingBenchmarks(raw,who,model.portfolioId,account);},
   backup(source='LOCAL_EXPORT'){const who=loaded();return mobileBackupEnvelope(raw,who,model.portfolioId,source);},
   async readBackup(text){let parsed;try{parsed=JSON.parse(text);}catch{throw new Error('備份檔不是有效的 JSON。');}const state=await mobileParseBackup(parsed);if(!state||typeof state!=='object'||!Array.isArray(state.appTransactions))throw new Error('備份檔缺少交易資料。');return {state,createdAt:parsed.createdAt||'',source:parsed.source||'',incoming:contentCount(state),current:contentCount(raw)};},
+  driveFiles(folderId){return withDrive(token=>listCsvFiles(folderId,token,fetcher));},
+  driveFolderName(folderId){return withDrive(token=>folderName(folderId,token,fetcher));},
+  driveDownload(file){return withDrive(token=>downloadCsv(file,token,fetcher));},
   driveStatus(){return callFunction('getBackupStatus');},
   driveConnect(){return callFunction('startDriveAuthorization',{namespace:baseline?.ns||namespaceFor(identity().email,customNamespace)});},
   driveRunNow(){return callFunction('runBackupNow');},
   driveDisconnect(){return callFunction('disconnectDrive');},
   get user(){return auth.currentUser;},get namespace(){return baseline?.ns||'';},get busy(){return busy;}
  };
- function publishAuth(user){epoch++;baseline=null;raw=null;model=null;onAuthChange(user,client);}
+ function publishAuth(user){epoch++;driveAccess=null;baseline=null;raw=null;model=null;onAuthChange(user,client);}
  authModule.onAuthStateChanged(auth,user=>{if(!emailLoginPending)publishAuth(user);});
  try{nativeAuth.completeRedirectReauthentication(await authModule.getRedirectResult(auth));}catch(error){onAuthChange(auth.currentUser,client,error);}
  return client;

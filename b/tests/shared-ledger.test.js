@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {projectLedger,buildOperation,sellOptions,borrowOptions,exchangePreview,estimateCosts,starterLedger,taipeiToday,minimalLots,CATEGORIES,reportView,reportPdf,reportXls,missingBenchmarks,contentCount} from '../public/model.js';
 import {mobileBackupEnvelope,mobileParseBackup} from '../public/legacy-engine.js';
+import {parseFolderId,latestByAccount,listCsvFiles,downloadCsv,decodeCsv,DRIVE_SCOPE} from '../public/drive-import.js';
 import {fetchQuote,benchmarkFor,yahooSymbolFor} from '../public/quotes.js';
 import {createLedgerClient,namespaceFor,compressLedger,decodeLedger} from '../public/cloud-client.js';
 const original=JSON.parse(readFileSync(new URL('./fixture.json',import.meta.url)));
@@ -485,4 +486,44 @@ test('Review fixes: lent buys, cost-exchanged buys, negative cash and ledger per
  // Low: renaming another portfolio needs edit rights on that portfolio.
  const shared=structuredClone(raw);shared.portfolios.push({id:'other-p',userId:'someone',name:'別人的帳本'});shared.portfolioMembers.push({id:'m2',portfolioId:'other-p',userId:'review-user',role:'VIEWER'});
  assert.throws(()=>buildOperation(shared,who,pid,{kind:'upsertPortfolio',id:'other-p',fields:{name:'改名'}}),/權限|找不到/);
+});
+test('Drive import: folder links, keyword matching per account, and settings saved in the ledger',()=>{
+ assert.equal(parseFolderId('https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOp?usp=sharing'),'1AbCdEfGhIjKlMnOp');
+ assert.equal(parseFolderId('https://drive.google.com/open?id=1AbCdEfGhIjKlMnOp'),'1AbCdEfGhIjKlMnOp');
+ assert.equal(parseFolderId('1AbCdEfGhIjKlMnOp'),'1AbCdEfGhIjKlMnOp');assert.equal(parseFolderId('不是連結'),'');
+ const files=[{id:'1',name:'Jack_對帳單_0930.csv',modifiedTime:'2026-09-30T10:00:00Z'},{id:'2',name:'jack_對帳單_1005.csv',modifiedTime:'2026-10-05T10:00:00Z'},{id:'3',name:'penny-1004.csv',modifiedTime:'2026-10-04T10:00:00Z'},{id:'4',name:'jack+penny 合併.csv',modifiedTime:'2026-10-06T10:00:00Z'}];
+ const rows=latestByAccount(files,[{id:'a',keyword:'jack'},{id:'b',keyword:'Penny'},{id:'c',keyword:''},{id:'d',keyword:'mary'}]);
+ assert.deepEqual(rows.map(r=>[r.account,r.file?.id||null]),[['a','2'],['b','3'],['d',null]],'newest per keyword; a name with two accounts\' keywords is skipped');
+ assert.equal(projectLedger(fixture(),who,pid).driveImport.folderId,'1bH_zM8xBiRe0wyhn28B2p7sOukziN1GQ','jack\'s folder is the default until one is saved');
+ const raw=fixture(),next=buildOperation(raw,who,pid,{kind:'saveDriveImport',fields:{folderId:'1AbCdEfGhIjKlMnOp',folderName:'券商對帳單',keywords:{'review-a':'jack','review-b':'penny'}}});
+ assert.deepEqual(projectLedger(next,who,pid).driveImport,{folderId:'1AbCdEfGhIjKlMnOp',folderName:'券商對帳單',keywords:{'review-a':'jack','review-b':'penny'}});
+ assert.equal(next.auditLogs.at(-1).entityType,'drive_import_settings');
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'saveDriveImport',fields:{folderId:'bad',keywords:{}}}),/資料夾/);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'saveDriveImport',fields:{folderId:'1AbCdEfGhIjKlMnOp',keywords:{'review-a':'Jack','review-b':'jack'}}}),/不一樣/);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'saveDriveImport',fields:{folderId:'1AbCdEfGhIjKlMnOp',keywords:{'nope':'x'}}}),/已改變/);
+});
+test('Drive import: lists the folder, downloads CSV or exports a Google Sheet, Big5 fallback, clear errors',async()=>{
+ const calls=[],big5=new Uint8Array([0xaa,0xd1,0xa6,0x57]);// 股名 in Big5
+ const fetcher=async(url,init)=>{calls.push([url,init.headers.Authorization]);
+  if(url.includes('/files?'))return {ok:true,json:async()=>({files:[{id:'f1',name:'jack.csv',mimeType:'text/csv',modifiedTime:'2026-10-05T00:00:00Z'}]})};
+  if(url.includes('/export?'))return {ok:true,arrayBuffer:async()=>new TextEncoder().encode('股名,日期').buffer};
+  if(url.includes('alt=media'))return {ok:true,arrayBuffer:async()=>big5.buffer};
+  return {ok:false,status:404,json:async()=>({error:{message:'not found'}})};};
+ const files=await listCsvFiles('FOLDER1234567',`tok`,fetcher);assert.equal(files[0].name,'jack.csv');
+ assert.match(new URL(calls[0][0]).searchParams.get('q'),/'FOLDER1234567' in parents and trashed=false/);assert.equal(calls[0][1],'Bearer tok');
+ assert.equal(await downloadCsv({id:'s1',mimeType:'application/vnd.google-apps.spreadsheet'},'tok',fetcher),'股名,日期');
+ assert.equal(await downloadCsv({id:'f1',mimeType:'text/csv'},'tok',fetcher),'股名');
+ assert.equal(decodeCsv(new TextEncoder().encode('股名').buffer),'股名');
+ await assert.rejects(downloadCsv({id:'big',size:6000000},'tok',fetcher),/5MB/);
+ await assert.rejects(listCsvFiles('X1234567890','tok',async()=>({ok:false,status:403,json:async()=>({error:{errors:[{reason:'accessNotConfigured'}],message:'Google Drive API has not been used'}})})),{code:'drive/api-disabled'});
+ await assert.rejects(listCsvFiles('X1234567890','tok',async()=>{throw new TypeError('Failed to fetch');}),{code:'unavailable'});
+ // The client asks Google for a read-only Drive token with the same account, and retries once when the token has expired.
+ const docs=new Map([[head,{state:fixture(),ownerUid:who.uid,ownerEmail:who.email,updatedAt:'x'}]]),m=mockSdk(docs);let scopes=[],popups=0,listed=0;
+ m.sdk[1].GoogleAuthProvider=class{addScope(s){scopes.push(s);}setCustomParameters(){}static credentialFromResult(r){return {accessToken:r.token};}};
+ m.sdk[1].reauthenticateWithPopup=async(user)=>{popups++;return {user,token:'t'+popups};};
+ const c=await createLedgerClient({}, {sdk:m.sdk,fetcher:async(url,init)=>{listed++;if(listed===2)return {ok:false,status:401,json:async()=>({})};return {ok:true,json:async()=>({files:[{id:'x',name:init.headers.Authorization}]})};}});
+ await c.reload();
+ assert.equal((await c.driveFiles('FOLDER1234567'))[0].name,'Bearer t1');assert.deepEqual(scopes,[DRIVE_SCOPE]);
+ assert.equal((await c.driveFiles('FOLDER1234567'))[0].name,'Bearer t2','an expired token triggers one new Google sign-in');assert.equal(popups,2);
+ assert.equal((await c.driveFiles('FOLDER1234567'))[0].name,'Bearer t2','a valid token is reused');assert.equal(popups,2);
 });

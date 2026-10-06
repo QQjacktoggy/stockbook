@@ -1,4 +1,5 @@
 import { evaluateLedger, mobileInventory, mobileAmounts, mobileBasis, mobileSellOptions, mobileCosts, acceptanceKey, mobileNormalizeTransaction, mobileSettings, mobileBorrowOptions, mobileValidateBorrow, mobileExchangeLots, mobileExchangeEligible, mobileExchangePlan, mobileAssetType, mobileImport, mobileClearAcceptedDiffs, mobileReport, mobileReportPdfHtml, mobileReportXls, mobileRestore, mobileContentCount } from './legacy-engine.js';
+import { DEFAULT_FOLDER_ID } from './drive-import.js';
 export function taipeiToday(now=new Date()){return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(now);}
 function num(v){return Number(v)||0;}
 const clone=x=>structuredClone(x);
@@ -29,7 +30,8 @@ export function projectLedger(raw,identity,portfolioId='',account='all'){
  const batches=scoped(data,pid,'importBatches').map(b=>({id:b.id,filename:b.sourceFilename||'',sourceType:b.sourceType||'',importedAt:b.importedAt||b.createdAt||'',rows:num(b.rowCount),created:num(b.createdCount),duplicate:num(b.duplicateCount),from:b.dateFrom||'',to:b.dateTo||'',status:b.status||'',account:b.brokerAccountId,executions:data.brokerExecutions.filter(x=>x.importBatchId===b.id).length,transactions:data.appTransactions.filter(t=>t.importBatchId===b.id).length})).sort((a,b)=>String(b.importedAt).localeCompare(String(a.importedAt)));
  const templates=(data.importTemplates||[]).map(t=>({id:t.id,name:t.templateName||t.id,brokerId:t.brokerId,isDefault:!!t.isDefault||t.id==='tpl-cathay-default',mapping:t.columnMapping||{}}));
  const reconciliation=scoped(data,pid,'reconciliationLinks').map(l=>({...l,key:acceptanceKey(l),settled:['MATCHED','AUTO_GROUP_MATCHED'].includes(l.matchStatus)||!!l.brokerAcceptedAt}));
- return {schema:2,batches,templates,cycles,matches,exchanges,allAccounts,transfers,positions,brokers,settings:{defaultSecurity:settings.defaultSecurity,defaultRebuyOffset:num(settings.defaultRebuyOffset),coreHoldingShares:num(settings.coreHoldingShares),priceTolerance:num(settings.priceTolerance),amountTolerance:num(settings.amountTolerance),feeAllocationMethod:settings.feeAllocationMethod},defaultCode:(data.securities.find(s=>String(s.symbol||'').toUpperCase()===String(mobileSettings(data,pid).defaultSecurity||'0050').toUpperCase())||{}).id||'',account,cash,lots,trades,stocks,accounts,rebuy,reconciliation,portfolioId:pid,portfolios:evaluated.portfolios.map(p=>({id:p.id,name:p.name||p.portfolioName||'投資帳本'})),user:{id:user.id,name:identity.displayName||user.name||user.email,email:identity.email},updatedAt:'',raw:data};
+ const drive=raw.settings?.driveImport?.[pid]||{},driveImport={folderId:String(drive.folderId||DEFAULT_FOLDER_ID),folderName:String(drive.folderName||''),keywords:{...(drive.keywords||{})}};
+ return {schema:2,driveImport,batches,templates,cycles,matches,exchanges,allAccounts,transfers,positions,brokers,settings:{defaultSecurity:settings.defaultSecurity,defaultRebuyOffset:num(settings.defaultRebuyOffset),coreHoldingShares:num(settings.coreHoldingShares),priceTolerance:num(settings.priceTolerance),amountTolerance:num(settings.amountTolerance),feeAllocationMethod:settings.feeAllocationMethod},defaultCode:(data.securities.find(s=>String(s.symbol||'').toUpperCase()===String(mobileSettings(data,pid).defaultSecurity||'0050').toUpperCase())||{}).id||'',account,cash,lots,trades,stocks,accounts,rebuy,reconciliation,portfolioId:pid,portfolios:evaluated.portfolios.map(p=>({id:p.id,name:p.name||p.portfolioName||'投資帳本'})),user:{id:user.id,name:identity.displayName||user.name||user.email,email:identity.email},updatedAt:'',raw:data};
 }
 export const CATEGORIES=['LONG_TERM','TRADING','CORE','REBUY'];
 // Like A's quick sell: when no lots are chosen, take just enough lots in the offered (high price first) order.
@@ -237,6 +239,19 @@ export function buildOperation(raw,identity,portfolioId,op){
   const current=next.settings?.portfolios?.[pid]||{};before=clone(current.brokerFees?.[broker.id]||null);
   next.settings={...(next.settings||{}),portfolios:{...(next.settings?.portfolios||{}),[pid]:{...mobileSettings(data,pid),...current,brokerFees:{...(current.brokerFees||{}),[broker.id]:fees}}}};
   action='UPDATE';entityType='broker_fee_settings';entityId=pid;after={[broker.id]:fees};
+ }else if(op.kind==='saveDriveImport'){
+  // B only: the Drive folder that holds broker CSVs, and the file-name keyword for each broker account (e.g. jack, penny).
+  const f=op.fields||{},folderId=String(f.folderId||'').trim(),keywords={};
+  if(!/^[A-Za-z0-9_-]{10,}$/.test(folderId))throw new Error('請貼上 Google Drive 資料夾連結。');
+  for(const [id,kw] of Object.entries(f.keywords||{})){
+   if(!data.brokerAccounts.some(a=>a.id===id&&a.portfolioId===pid))throw new Error('券商帳戶已改變，請重新載入。');
+   const k=String(kw||'').trim().slice(0,40);if(k)keywords[id]=k;
+  }
+  const lower=Object.values(keywords).map(k=>k.toLowerCase());
+  if(new Set(lower).size!==lower.length)throw new Error('每個帳戶的關鍵字要不一樣。');
+  before=clone(next.settings?.driveImport?.[pid]||null);after={folderId,folderName:String(f.folderName||'').slice(0,200),keywords,updatedAt:now};
+  next.settings={...(next.settings||{}),driveImport:{...(next.settings?.driveImport||{}),[pid]:after}};
+  action='UPDATE';entityType='drive_import_settings';entityId=pid;
  }else if(op.kind==='saveSettings'){
   const f=op.fields||{},symbol=String(f.defaultSecurity||'0050').trim().toUpperCase(),nums=['defaultRebuyOffset','coreHoldingShares','priceTolerance','amountTolerance'];
   if(!data.securities.some(x=>String(x.symbol||'').toUpperCase()===symbol))throw new Error('預設股票 '+symbol+' 不在股票清單，請先新增。');
