@@ -1,4 +1,5 @@
-import { projectLedger, buildOperation, estimateCosts, sellOptions } from './model.js';
+import { projectLedger, buildOperation, estimateCosts, sellOptions, borrowOptions, exchangePreview, starterLedger, reportView, reportPdf, reportXls, missingBenchmarks, contentCount } from './model.js';
+import { mobileBackupEnvelope, mobileParseBackup } from './legacy-engine.js';
 import {createNativeAuth,nativeAuthError} from './native-auth.js';
 const SDK='https://www.gstatic.com/firebasejs/10.12.5/';
 export function namespaceFor(email,custom=''){const value=String(custom||String(email||'').toLowerCase()).trim().replace(/[^a-zA-Z0-9._-]/g,'_');if(!value)throw new Error('找不到帳本名稱。');return value;}
@@ -12,6 +13,7 @@ export async function decodeLedger(payload){
  const binary=atob(payload),bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));
  return JSON.parse(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text());
 }
+export function noLedgerError(){const e=new Error('這個帳號還沒有雲端帳本。可以在 B 版建立新帳本，或確認自訂帳本名稱。');e.code='stockbook/no-ledger';return e;}
 export function conflictError(){const e=new Error('A 版或其他裝置已更新帳本。這次未儲存；請重新載入最新資料後再修改。');e.code='stockbook/conflict';return e;}
 export function errorText(error){
  const code=String(error?.code||'');
@@ -23,7 +25,7 @@ export function errorText(error){
  if(code.includes('network-request-failed')||code.includes('unavailable'))return '連線失敗，無法確認操作是否完成。請重新載入並檢查這筆交易後再操作。';
  return error?.message||'操作失敗，請重試。';
 }
-export async function createLedgerClient(config,{sdk:injected=null,onAuthChange=()=>{}}={}){
+export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=null,fetcher=(...a)=>fetch(...a),onAuthChange=()=>{}}={}){
  const [appModule,authModule,firestoreModule]=injected||await Promise.all([import(SDK+'firebase-app.js'),import(SDK+'firebase-auth.js'),import(SDK+'firebase-firestore.js')]);
  const app=appModule.initializeApp(config,'stockbook-mobile-b'),auth=authModule.getAuth(app),db=firestoreModule.getFirestore(app);
  let baseline=null,raw=null,model=null,customNamespace='',busy=false,epoch=0,emailLoginPending=false;
@@ -33,7 +35,7 @@ export async function createLedgerClient(config,{sdk:injected=null,onAuthChange=
  async function readSnapshot(ns){
   return firestoreModule.runTransaction(db,async tx=>{
    const headRef=firestoreModule.doc(db,'stockLedgers',ns),head=await tx.get(headRef);
-   if(!head.exists())throw new Error('找不到原本的雲端帳本。請先在 A 版同步，或確認自訂帳本名稱；B 版不會建立空白帳本覆蓋資料。');
+   if(!head.exists())throw noLedgerError();
    const main=head.data();
    if(main.state){if(typeof main.state!=='object')throw new Error('雲端帳本格式不正確。');return {ns,main,chunks:[],payload:main.state};}
    if(!Number.isInteger(main.chunkCount)||main.chunkCount<1||main.chunkCount>200)throw new Error('帳本資料區塊數量不正確。');
@@ -50,6 +52,32 @@ export async function createLedgerClient(config,{sdk:injected=null,onAuthChange=
   if(ticket!==epoch||auth.currentUser?.uid!==who.uid)throw new Error('登入狀態已改變，請重新載入。');
   baseline=shot;raw=next;model=projected;customNamespace=namespace;
   return model;
+ }
+ // First use: Firestore rules can't read a document that doesn't exist, so a read-then-write transaction can't tell "missing" from "denied".
+ // B therefore creates the head and chunk_0 in one REST commit with an exists:false precondition: it can only create, never overwrite,
+ // even when two devices (or A's first sync) create the same ledger at the same moment. The create rule still checks the owner.
+ async function createOnly(ns,docs){
+  const user=auth.currentUser,token=await user.getIdToken(),base='projects/'+config.projectId+'/databases/(default)/documents/';
+  const value=v=>typeof v==='boolean'?{booleanValue:v}:Number.isInteger(v)?{integerValue:String(v)}:{stringValue:String(v)};
+  const writes=docs.map(([path,data])=>({update:{name:base+path,fields:Object.fromEntries(Object.entries(data).map(([k,v])=>[k,value(v)]))},currentDocument:{exists:false}}));
+  let response;
+  try{response=await fetcher('https://firestore.googleapis.com/v1/'+base.slice(0,-1)+':commit',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({writes})});}
+  catch(error){throw Object.assign(new Error('連線失敗，無法確認帳本是否已建立。請重新載入；若已建立就會直接開啟。'),{code:'unavailable',cause:error});}
+  if(response.ok)return;
+  const status=(await response.json().catch(()=>({})))?.error?.status||'';
+  if(response.status===409||status==='ALREADY_EXISTS'||status==='FAILED_PRECONDITION')throw Object.assign(new Error('雲端已經有這個帳本，請重新載入，不會建立新帳本。'),{code:'stockbook/exists'});
+  if(response.status===403||status==='PERMISSION_DENIED')throw Object.assign(new Error('沒有權限建立這個帳本名稱。它可能屬於其他帳號，請確認登入的帳號與帳本名稱。'),{code:'stockbook/create-denied'});
+  throw Object.assign(new Error('建立帳本失敗（'+(status||response.status)+'），請稍後再試。'),{code:'unavailable'});
+ }
+ async function createLedger(options={}){
+  if(busy)throw new Error('正在儲存，請稍候。');
+  const who=identity(),wanted=options.namespace??customNamespace,ns=namespaceFor(who.email,wanted);
+  const raw0=starterLedger(who,options),payload=await compressLedger(raw0),updatedAt=new Date().toISOString(),bRevision=crypto.randomUUID();
+  if(payload.length>800000)throw new Error('新帳本資料異常，未建立。');
+  busy=true;
+  try{await createOnly(ns,[['stockLedgers/'+ns,{namespace:ns,ownerUid:who.uid,ownerEmail:who.email,updatedAt,chunkCount:1,isCompressed:true,bRevision}],['stockLedgers/'+ns+'/chunks/chunk_0',{index:0,data:payload,ownerUid:who.uid,updatedAt}]]);}
+  finally{busy=false;}
+  return reload({namespace:wanted});
  }
  async function commit(operation){
   if(busy)throw new Error('正在儲存，請勿重複送出。');
@@ -85,6 +113,14 @@ export async function createLedgerClient(config,{sdk:injected=null,onAuthChange=
    return model;
   }finally{busy=false;}
  }
+ // Google Drive backup uses A's existing Cloud Functions (asia-east1); the functions themselves are unchanged.
+ let functions=null;
+ async function callFunction(name,data={}){
+  identity();
+  if(!functions){const mod=functionsSdk||await import(SDK+'firebase-functions.js');functions={mod,instance:mod.getFunctions(app,'asia-east1')};}
+  return (await functions.mod.httpsCallable(functions.instance,name)(data)).data;
+ }
+ function loaded(){if(!raw||!model)throw new Error('請先載入帳本。');return identity();}
  const client={
   nativeAuth,
   async signInPassword(email,password){
@@ -95,11 +131,23 @@ export async function createLedgerClient(config,{sdk:injected=null,onAuthChange=
   },
   async signIn(redirect=false){const provider=new authModule.GoogleAuthProvider();provider.setCustomParameters({prompt:'select_account'});if(redirect)return authModule.signInWithRedirect(auth,provider);return authModule.signInWithPopup(auth,provider);},
   async signOut(){epoch++;baseline=null;raw=null;model=null;return authModule.signOut(auth);},
-  reload,commit,
+  reload,commit,createLedger,
   view(){return model;},
   select(portfolioId,account='all'){if(!raw)throw new Error('請先載入帳本。');model=projectLedger(raw,identity(),portfolioId,account);model.updatedAt=baseline?.main.updatedAt||'';return model;},
   costs(fields){if(!raw||!model)return {fee:0,tax:0};return estimateCosts(raw,identity(),model.portfolioId,fields);},
   sellOptions(fields){if(!raw||!model)return [];return sellOptions(raw,identity(),model.portfolioId,fields);},
+  borrowOptions(fields){if(!raw||!model)return [];return borrowOptions(raw,identity(),model.portfolioId,fields);},
+  exchangePreview(fields){if(!raw||!model)throw new Error('請先載入帳本。');return exchangePreview(raw,identity(),model.portfolioId,fields);},
+  report(account=model?.account||'all'){const who=loaded();return reportView(raw,who,model.portfolioId,account);},
+  reportPdf(account=model?.account||'all'){const who=loaded();return reportPdf(raw,who,model.portfolioId,account);},
+  reportXls(account=model?.account||'all'){const who=loaded();return reportXls(raw,who,model.portfolioId,account);},
+  missingBenchmarks(account=model?.account||'all'){const who=loaded();return missingBenchmarks(raw,who,model.portfolioId,account);},
+  backup(source='LOCAL_EXPORT'){const who=loaded();return mobileBackupEnvelope(raw,who,model.portfolioId,source);},
+  async readBackup(text){let parsed;try{parsed=JSON.parse(text);}catch{throw new Error('備份檔不是有效的 JSON。');}const state=await mobileParseBackup(parsed);if(!state||typeof state!=='object'||!Array.isArray(state.appTransactions))throw new Error('備份檔缺少交易資料。');return {state,createdAt:parsed.createdAt||'',source:parsed.source||'',incoming:contentCount(state),current:contentCount(raw)};},
+  driveStatus(){return callFunction('getBackupStatus');},
+  driveConnect(){return callFunction('startDriveAuthorization',{namespace:baseline?.ns||namespaceFor(identity().email,customNamespace)});},
+  driveRunNow(){return callFunction('runBackupNow');},
+  driveDisconnect(){return callFunction('disconnectDrive');},
   get user(){return auth.currentUser;},get namespace(){return baseline?.ns||'';},get busy(){return busy;}
  };
  function publishAuth(user){epoch++;baseline=null;raw=null;model=null;onAuthChange(user,client);}
