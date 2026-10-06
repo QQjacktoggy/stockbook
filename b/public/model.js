@@ -19,8 +19,15 @@ export function projectLedger(raw,identity,portfolioId='',account='all'){
  const matches={};for(const m of data.sellMatches.filter(m=>m.portfolioId===pid)){const lot=lotById.get(m.buyLotId);(matches[m.sellTransactionId]=matches[m.sellTransactionId]||[]).push({buy:lot?.sourceTransactionId||lot?.buyTransactionId||'',date:m.buyDate,price:num(m.buyPrice),qty:num(m.matchedShares),profit:num(m.netProfit)});}
  const adjusted=new Map(mobileInventory(data).map(l=>[l.buyTransactionId,l]));
  const exchanges=scoped(data,pid,'inventoryCostExchanges').map(x=>({id:x.id,code:x.securityId,account:x.brokerAccountId,date:x.exchangeDate,source:x.sourceBuyTransactionId,shares:num(x.sourceShares),originalPrice:num(x.sourceOriginalPrice),externalPrice:num(x.externalPrice),finalPrice:num(x.sourceFinalPrice),redistributed:num(x.redistributedAmount),label:x.externalAccountLabel||'',targets:(x.targetAdjustments||[]).map(t=>({id:t.buyTransactionId,shares:num(t.shares),before:num(t.beforePrice),after:num(t.afterPrice)})),deletable:(x.lotAdjustments||[]).every(a=>mobileExchangeEligible(adjusted.get(a.buyTransactionId)))}));
+ const settings=mobileSettings(data,pid);
+ const allAccounts=scoped(data,pid,'brokerAccounts').map(a=>({id:a.id,name:a.accountName||a.name||a.id,brokerId:a.brokerId,broker:data.brokers.find(b=>b.id===a.brokerId)?.name||'券商',masked:a.accountNoMasked||'',branch:a.branchName||'',isDefault:!!a.isDefault,active:a.isActive!==false,used:accountUsed(data,a.id)}));
+ const transfers=scoped(data,pid,'accountTransfers').map(x=>({id:x.id,from:x.fromBrokerAccountId,to:x.toBrokerAccountId,date:x.transferDate,amount:num(x.amount),fee:num(x.fee),note:x.note||''})).sort((a,b)=>b.date.localeCompare(a.date));
+ const positions=scoped(data,pid,'positionTransfers').map(x=>({id:x.id,code:x.securityId,from:x.fromBrokerAccountId,to:x.toBrokerAccountId,date:x.transferDate,shares:num(x.shares),basis:num(x.originalCostBasis),note:x.note||''})).sort((a,b)=>b.date.localeCompare(a.date));
+ const brokers=data.brokers.filter(b=>b.isActive!==false).map(b=>({id:b.id,name:b.name,fees:{feeRate:0.001425,discountRate:0.28,minFee:1,stockSellTaxRate:0.003,etfSellTaxRate:0.001,...(settings.brokerFees||{})[b.id]}}));
+ const securitiesUsed=new Set([...data.appTransactions,...data.brokerExecutions,...data.positionTransfers].map(x=>x.securityId));
+ for(const id of Object.keys(stocks))stocks[id].used=securitiesUsed.has(id);
  const reconciliation=scoped(data,pid,'reconciliationLinks').map(l=>({...l,key:acceptanceKey(l),settled:['MATCHED','AUTO_GROUP_MATCHED'].includes(l.matchStatus)||!!l.brokerAcceptedAt}));
- return {schema:2,cycles,matches,exchanges,defaultCode:(data.securities.find(s=>String(s.symbol||'').toUpperCase()===String(mobileSettings(data,pid).defaultSecurity||'0050').toUpperCase())||{}).id||'',account,cash,lots,trades,stocks,accounts,rebuy,reconciliation,portfolioId:pid,portfolios:evaluated.portfolios.map(p=>({id:p.id,name:p.name||p.portfolioName||'投資帳本'})),user:{id:user.id,name:identity.displayName||user.name||user.email,email:identity.email},updatedAt:'',raw:data};
+ return {schema:2,cycles,matches,exchanges,allAccounts,transfers,positions,brokers,settings:{defaultSecurity:settings.defaultSecurity,defaultRebuyOffset:num(settings.defaultRebuyOffset),coreHoldingShares:num(settings.coreHoldingShares),priceTolerance:num(settings.priceTolerance),amountTolerance:num(settings.amountTolerance),feeAllocationMethod:settings.feeAllocationMethod},defaultCode:(data.securities.find(s=>String(s.symbol||'').toUpperCase()===String(mobileSettings(data,pid).defaultSecurity||'0050').toUpperCase())||{}).id||'',account,cash,lots,trades,stocks,accounts,rebuy,reconciliation,portfolioId:pid,portfolios:evaluated.portfolios.map(p=>({id:p.id,name:p.name||p.portfolioName||'投資帳本'})),user:{id:user.id,name:identity.displayName||user.name||user.email,email:identity.email},updatedAt:'',raw:data};
 }
 export const CATEGORIES=['LONG_TERM','TRADING','CORE','REBUY'];
 // Like A's quick sell: when no lots are chosen, take just enough lots in the offered (high price first) order.
@@ -50,6 +57,26 @@ function exchangePlan(data,pid,f){
  const targets=(f.targets||[]).map(t=>{const lot=eligible.find(l=>l.buyTransactionId===t.id);if(!lot||lot.buyTransactionId===source.buyTransactionId||lot.brokerAccountId!==source.brokerAccountId)throw new Error('選取的調降庫存已不符合調整資格。');return {lot,reductionPerShare:t.reduction};});
  return {source,targets,plan:mobileExchangePlan(data,source,f.externalPrice,targets)};
 }
+function accountUsed(data,id){return ['appTransactions','brokerExecutions','importBatches'].some(k=>(data[k]||[]).some(x=>x.brokerAccountId===id))||['accountTransfers','positionTransfers'].some(k=>(data[k]||[]).some(x=>x.fromBrokerAccountId===id||x.toBrokerAccountId===id));}
+// A brand-new ledger, shaped like A's first login (upsertFirebaseUser + ensureStarterData) and A's cloud export.
+export function starterLedger(identity,{portfolioName='',brokerId='broker-cathay',accountName=''}={},now=new Date().toISOString()){
+ const uid=String(identity.uid||''),email=String(identity.email||'').toLowerCase();
+ if(!uid||!email)throw new Error('請先登入。');
+ const userId='firebase-'+uid,pid='portfolio-b-'+crypto.randomUUID(),aid='broker-account-b-'+crypto.randomUUID();
+ const raw={
+  users:[{id:userId,email,name:identity.displayName||email,passwordHash:'',authProvider:'google',firebaseUid:uid,photoURL:'',createdAt:now,updatedAt:now}],
+  portfolios:[{id:pid,userId,name:String(portfolioName||'').trim()||'0050 策略帳本',baseCurrency:'TWD',createdAt:now,updatedAt:now}],
+  portfolioMembers:[{id:'member-b-'+crypto.randomUUID(),portfolioId:pid,userId,role:'OWNER',createdAt:now,updatedAt:now}],
+  securities:[{id:'sec-0050',symbol:'0050',name:'元大台灣50',market:'TW',currency:'TWD',assetType:'ETF',createdAt:now,updatedAt:now}],
+  brokerAccounts:[{id:aid,userId,portfolioId:pid,brokerId,accountName:String(accountName||'').trim()||'主帳戶',accountNoMasked:'',branchName:'',currency:'TWD',isDefault:true,isActive:true,createdAt:now,updatedAt:now}],
+  importBatches:[],rawImportRows:[],appTransactions:[],brokerExecutions:[],accountTransfers:[],positionTransfers:[],inventoryCostExchanges:[],marketQuotes:[],
+  auditLogs:[{id:'audit-b-'+crypto.randomUUID(),userId,portfolioId:pid,action:'CREATE',entityType:'portfolio',entityId:pid,before:null,after:{name:String(portfolioName||'').trim()||'0050 策略帳本'},createdAt:now,source:'MOBILE_B'}],
+  settings:{user:{timezone:'Asia/Taipei',baseCurrency:'TWD',dateFormat:'YYYY-MM-DD'},portfolios:{[pid]:mobileSettings({settings:{portfolios:{}}},'')}},
+  acceptedBrokerDiffs:{},manualClosedRebuySellIds:[]
+ };
+ evaluateLedger(raw,identity,pid);
+ return raw;
+}
 function canWrite(data,user,pid){
  const p=data.portfolios.find(x=>x.id===pid);
  return p?.userId===user.id||data.portfolioMembers.some(m=>m.portfolioId===pid&&m.userId===user.id&&['OWNER','EDITOR'].includes(m.role));
@@ -67,6 +94,8 @@ function validateDate(date){
 }
 const CASH_TYPES=['DEPOSIT','WITHDRAW','DIVIDEND','INTEREST'];
 const BENCHMARK_KEYS=['benchmarkSecurityId','benchmarkSymbol','benchmarkPrice','benchmarkPriceSource','benchmarkPriceDate','benchmarkPriceCapturedAt'];
+function activeAccount(data,pid,id){return data.brokerAccounts.find(a=>a.id===id&&a.portfolioId===pid&&a.isActive!==false);}
+function evaluatedPortfolios(raw,identity){return evaluateLedger(raw,identity,'').portfolios.map(p=>p.id);}
 function accountCash(data,pid,accountId){return data.cashLedger.filter(r=>r.portfolioId===pid&&r.brokerAccountId===accountId).reduce((s,r)=>s+num(r.amount),0);}
 function ownNet(data,id){const t=data.appTransactions.find(x=>x.id===id);return t?num(mobileAmounts(data,t).netAmount):0;}
 function activeTask(task){return task&&!['CLOSED','MANUAL_CLOSED'].includes(task.status)&&num(task.remainingRebuyShares)>0;}
@@ -114,6 +143,105 @@ export function buildOperation(raw,identity,portfolioId,op){
   entityId='security-b-'+crypto.randomUUID();
   after={id:entityId,userId:user.id,symbol,name,market,currency:'TWD',yahooSymbol:String(f.yahooSymbol||'').trim().toUpperCase(),assetType:mobileAssetType(symbol,name,f.assetType),createdAt:now,updatedAt:now};
   next.securities=[...(next.securities||[]),after];action='CREATE';entityType='security';
+ }else if(op.kind==='upsertCashTransfer'||op.kind==='deleteCashTransfer'){
+  // A's 現金轉帳: moves cash between broker accounts without counting as a deposit.
+  next.accountTransfers=next.accountTransfers||[];
+  const old=op.id?next.accountTransfers.find(x=>x.id===op.id&&x.portfolioId===pid):null;
+  if(op.id&&!old)throw new Error('找不到這筆轉帳，請重新載入。');
+  before=old?clone(old):null;entityType='account_transfer';
+  if(op.kind==='deleteCashTransfer'){next.accountTransfers=next.accountTransfers.filter(x=>x.id!==old.id);action='DELETE';entityId=old.id;}
+  else{
+   const f=op.fields||{},amount=Number(f.amount),fee=Number(f.fee||0),from=activeAccount(data,pid,f.from),to=activeAccount(data,pid,f.to);
+   validateDate(f.date);
+   if(!from||!to)throw new Error('請選擇這份帳本的轉出與轉入帳戶。');
+   if(from.id===to.id)throw new Error('轉出與轉入帳戶不可相同。');
+   if(!Number.isFinite(amount)||amount<=0||!Number.isFinite(fee)||fee<0)throw new Error('金額必須大於 0，費用不可為負數。');
+   const restored=old&&old.fromBrokerAccountId===from.id?num(old.amount)+num(old.fee):old&&old.toBrokerAccountId===from.id?-num(old.amount):0;
+   if(amount+fee>accountCash(data,pid,from.id)+restored)throw new Error('轉出帳戶現金不足。');
+   entityId=old?.id||'cash-transfer-b-'+crypto.randomUUID();
+   after={...(old||{}),id:entityId,portfolioId:pid,fromBrokerAccountId:from.id,toBrokerAccountId:to.id,transferDate:f.date,amount,fee,note:String(f.note||'').trim().slice(0,4000),createdAt:old?.createdAt||now,updatedAt:now};
+   next.accountTransfers=old?next.accountTransfers.map(x=>x.id===old.id?after:x):[...next.accountTransfers,after];action=old?'UPDATE':'CREATE';
+  }
+ }else if(op.kind==='upsertPositionTransfer'||op.kind==='deletePositionTransfer'){
+  // A's 股票轉戶 is a record of shares moved between accounts with their original cost; like A it does not move inventory lots.
+  next.positionTransfers=next.positionTransfers||[];
+  const old=op.id?next.positionTransfers.find(x=>x.id===op.id&&x.portfolioId===pid):null;
+  if(op.id&&!old)throw new Error('找不到這筆轉戶，請重新載入。');
+  before=old?clone(old):null;entityType='position_transfer';
+  if(op.kind==='deletePositionTransfer'){next.positionTransfers=next.positionTransfers.filter(x=>x.id!==old.id);action='DELETE';entityId=old.id;}
+  else{
+   const f=op.fields||{},shares=Number(f.shares),basis=Number(f.basis),from=activeAccount(data,pid,f.from),to=activeAccount(data,pid,f.to),security=data.securities.find(x=>x.id===f.code);
+   validateDate(f.date);
+   if(!from||!to||!security)throw new Error('請選擇股票與這份帳本的轉出、轉入帳戶。');
+   if(from.id===to.id)throw new Error('轉出與轉入帳戶不可相同。');
+   if(!Number.isInteger(shares)||shares<=0||!Number.isFinite(basis)||basis<0)throw new Error('股數必須是正整數，原始成本不可為負數。');
+   entityId=old?.id||'position-transfer-b-'+crypto.randomUUID();
+   after={...(old||{}),id:entityId,portfolioId:pid,securityId:security.id,fromBrokerAccountId:from.id,toBrokerAccountId:to.id,transferDate:f.date,shares,originalCostBasis:basis,note:String(f.note||'').trim().slice(0,4000),createdAt:old?.createdAt||now,updatedAt:now};
+   next.positionTransfers=old?next.positionTransfers.map(x=>x.id===old.id?after:x):[...next.positionTransfers,after];action=old?'UPDATE':'CREATE';
+  }
+ }else if(op.kind==='upsertPortfolio'){
+  const f=op.fields||{},name=String(f.name||'').trim().slice(0,80),old=op.id?next.portfolios.find(x=>x.id===op.id):null;
+  if(!name)throw new Error('請輸入帳本名稱。');
+  if(op.id&&(!old||!evaluatedPortfolios(raw,identity).includes(old.id)))throw new Error('找不到這份帳本。');
+  entityType='portfolio';
+  if(old){before=clone(old);after={...old,name,updatedAt:now};next.portfolios=next.portfolios.map(x=>x.id===old.id?after:x);entityId=old.id;action='UPDATE';}
+  else{
+   entityId='portfolio-b-'+crypto.randomUUID();after={id:entityId,userId:user.id,name,baseCurrency:'TWD',createdAt:now,updatedAt:now};
+   next.portfolios=[...next.portfolios,after];next.portfolioMembers=[...(next.portfolioMembers||[]),{id:'member-b-'+crypto.randomUUID(),portfolioId:entityId,userId:user.id,role:'OWNER',createdAt:now,updatedAt:now}];
+   next.settings={...(next.settings||{}),portfolios:{...(next.settings?.portfolios||{}),[entityId]:mobileSettings({settings:{portfolios:{}}},'')}};action='CREATE';
+  }
+ }else if(op.kind==='upsertBrokerAccount'||op.kind==='deleteBrokerAccount'){
+  const old=op.id?next.brokerAccounts.find(x=>x.id===op.id&&x.portfolioId===pid):null;
+  if(op.id&&!old)throw new Error('找不到這個券商帳戶。');
+  before=old?clone(old):null;entityType='broker_account';
+  if(op.kind==='deleteBrokerAccount'){
+   if(accountUsed(data,old.id))throw new Error('這個帳戶已有交易、匯入或轉帳紀錄，不能刪除；可以改成停用。');
+   next.brokerAccounts=next.brokerAccounts.filter(x=>x.id!==old.id);next.cashAccounts=(next.cashAccounts||[]).filter(x=>x.brokerAccountId!==old.id);action='DELETE';entityId=old.id;
+  }else{
+   const f=op.fields||{},name=String(f.name||'').trim().slice(0,80),broker=data.brokers.find(b=>b.id===(old?.brokerId||f.brokerId));
+   if(!name)throw new Error('請輸入帳戶名稱。');
+   if(!broker)throw new Error('請選擇券商。');
+   const active=f.active!==false&&f.active!=='false',isDefault=!!f.isDefault&&f.isDefault!=='false'&&active;
+   if(old&&!active&&scoped(data,pid,'brokerAccounts').filter(a=>a.isActive!==false&&a.id!==old.id).length===0)throw new Error('至少要保留一個啟用中的帳戶。');
+   entityId=old?.id||'broker-account-b-'+crypto.randomUUID();
+   after={...(old||{userId:user.id,portfolioId:pid,brokerId:broker.id,currency:'TWD',createdAt:now}),id:entityId,accountName:name,accountNoMasked:String(f.masked||'').trim().slice(0,40),branchName:String(f.branch||'').trim().slice(0,40),isDefault,isActive:active,updatedAt:now};
+   next.brokerAccounts=(old?next.brokerAccounts.map(x=>x.id===old.id?after:x):[...next.brokerAccounts,after]).map(x=>isDefault&&x.portfolioId===pid&&x.id!==entityId&&x.isDefault?{...x,isDefault:false,updatedAt:now}:x);
+   if(!old&&Array.isArray(next.cashAccounts))next.cashAccounts.push({id:'cash-account-b-'+crypto.randomUUID(),portfolioId:pid,brokerAccountId:entityId,currency:'TWD',accountType:'BROKER_SETTLEMENT',name:broker.name+'交割戶',isActive:true,createdAt:now,updatedAt:now});
+   action=old?'UPDATE':'CREATE';
+  }
+ }else if(op.kind==='saveBrokerFees'){
+  const f=op.fields||{},broker=data.brokers.find(b=>b.id===f.brokerId),keys=['feeRate','discountRate','minFee','stockSellTaxRate','etfSellTaxRate'];
+  if(!broker)throw new Error('請選擇券商。');
+  const fees=Object.fromEntries(keys.map(k=>[k,Number(f[k])]));
+  if(keys.some(k=>!Number.isFinite(fees[k])||fees[k]<0)||fees.feeRate>0.01||fees.discountRate>1||fees.stockSellTaxRate>0.01||fees.etfSellTaxRate>0.01)throw new Error('費率數字不正確，請用小數（例如 0.001425、0.28）。');
+  fees.sellTaxRate=fees.stockSellTaxRate;
+  const current=next.settings?.portfolios?.[pid]||{};before=clone(current.brokerFees?.[broker.id]||null);
+  next.settings={...(next.settings||{}),portfolios:{...(next.settings?.portfolios||{}),[pid]:{...mobileSettings(data,pid),...current,brokerFees:{...(current.brokerFees||{}),[broker.id]:fees}}}};
+  action='UPDATE';entityType='broker_fee_settings';entityId=pid;after={[broker.id]:fees};
+ }else if(op.kind==='saveSettings'){
+  const f=op.fields||{},symbol=String(f.defaultSecurity||'0050').trim().toUpperCase(),nums=['defaultRebuyOffset','coreHoldingShares','priceTolerance','amountTolerance'];
+  if(!data.securities.some(x=>String(x.symbol||'').toUpperCase()===symbol))throw new Error('預設股票 '+symbol+' 不在股票清單，請先新增。');
+  if(nums.some(k=>!Number.isFinite(Number(f[k]))||Number(f[k])<0))throw new Error('設定數字不可為負數。');
+  if(!['BY_SHARES','BY_GROSS_AMOUNT'].includes(f.feeAllocationMethod))throw new Error('費稅分攤方式不正確。');
+  const current={...mobileSettings(data,pid),...(next.settings?.portfolios?.[pid]||{})};before=clone(current);
+  after={...current,defaultSecurity:symbol,...Object.fromEntries(nums.map(k=>[k,Number(f[k])])),feeAllocationMethod:f.feeAllocationMethod,defaultRebuyScope:'SAME_BROKER_ACCOUNT'};
+  next.settings={...(next.settings||{}),portfolios:{...(next.settings?.portfolios||{}),[pid]:after}};
+  action='UPDATE';entityType='portfolio_settings';entityId=pid;
+ }else if(op.kind==='updateSecurity'||op.kind==='deleteSecurity'){
+  const old=(next.securities||[]).find(x=>x.id===op.id);
+  if(!old)throw new Error('找不到這檔股票。');
+  before=clone(old);entityType='security';entityId=old.id;
+  if(op.kind==='deleteSecurity'){
+   if(data.appTransactions.some(t=>t.securityId===old.id)||data.brokerExecutions.some(x=>x.securityId===old.id)||data.positionTransfers.some(x=>x.securityId===old.id))throw new Error('這檔股票已有交易、券商紀錄或轉戶資料，不能刪除。可以改名或調整 Yahoo 代號。');
+   next.securities=next.securities.filter(x=>x.id!==old.id);next.marketQuotes=(next.marketQuotes||[]).filter(q=>q.securityId!==old.id);action='DELETE';
+  }else{
+   const f=op.fields||{},symbol=String(f.symbol||'').trim().toUpperCase(),name=String(f.name||'').trim().slice(0,80)||symbol,market=String(f.market||'TW').trim().toUpperCase();
+   if(!/^[0-9A-Z][0-9A-Z.\-]{0,14}$/.test(symbol))throw new Error('請輸入股票代號（英文或數字）。');
+   if(data.securities.some(x=>x.id!==old.id&&String(x.symbol||'').toUpperCase()===symbol))throw new Error('這個股票代號已存在。');
+   if(!['TW','TWO','US'].includes(market))throw new Error('市場請選上市、上櫃或美股。');
+   after={...old,symbol,name,market,yahooSymbol:String(f.yahooSymbol||'').trim().toUpperCase(),assetType:mobileAssetType(symbol,name,f.assetType),updatedAt:now};
+   next.securities=next.securities.map(x=>x.id===old.id?after:x);action='UPDATE';
+  }
  }else if(op.kind==='updateMatch'){
   // A's "儲存配對": choose which buys a sell is matched to, and optionally match fewer shares.
   const old=next.appTransactions.find(t=>t.id===op.id);

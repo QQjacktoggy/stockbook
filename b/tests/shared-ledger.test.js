@@ -2,7 +2,7 @@ import test from 'node:test';
 // Core transaction and SDK boundary tests use synthetic fixtures only.
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {projectLedger,buildOperation,sellOptions,borrowOptions,exchangePreview,taipeiToday,minimalLots,CATEGORIES} from '../public/model.js';
+import {projectLedger,buildOperation,sellOptions,borrowOptions,exchangePreview,estimateCosts,starterLedger,taipeiToday,minimalLots,CATEGORIES} from '../public/model.js';
 import {fetchQuote,benchmarkFor,yahooSymbolFor} from '../public/quotes.js';
 import {createLedgerClient,namespaceFor,compressLedger,decodeLedger} from '../public/cloud-client.js';
 const original=JSON.parse(readFileSync(new URL('./fixture.json',import.meta.url)));
@@ -309,4 +309,70 @@ test('Rebuy: a B buy fills the plan like A, and plans can be closed manually',()
  assert.deepEqual(closed.manualClosedRebuySellIds,[task.id]);assert.equal(projectLedger(closed,who,pid).rebuy.length,0);
  assert.equal(closed.auditLogs.at(-1).action,'MANUAL_CLOSE');
  assert.throws(()=>buildOperation(closed,who,pid,{kind:'closeRebuy',sellIds:[task.id]}),/已改變/);
+});
+test('Cash transfers move cash between accounts without counting as deposits (A 現金轉帳)',()=>{
+ const raw=fixture(),cash=d=>projectLedger(d,who,pid).cash,before=cash(raw),f=o=>({from:'review-a',to:'review-b',date:taipeiToday(),amount:1000,fee:10,note:'轉帳',...o});
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertCashTransfer',fields:f({to:'review-a'})}),/不可相同/);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertCashTransfer',fields:f({amount:99999999})}),/不足/);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertCashTransfer',fields:f({amount:0})}),/大於 0/);
+ const next=buildOperation(raw,who,pid,{kind:'upsertCashTransfer',fields:f()}),id=next.accountTransfers.at(-1).id;
+ assert.equal(cash(next)['review-a'],before['review-a']-1010);assert.equal(cash(next)['review-b'],before['review-b']+1000);
+ assert.equal(projectLedger(next,who,pid).transfers[0].amount,1000);assert.equal(next.auditLogs.at(-1).entityType,'account_transfer');
+ const edited=buildOperation(next,who,pid,{kind:'upsertCashTransfer',id,fields:f({amount:500,fee:0})});
+ assert.equal(cash(edited)['review-a'],before['review-a']-500);assert.equal(edited.accountTransfers.length,1);
+ assert.deepEqual(cash(buildOperation(next,who,pid,{kind:'deleteCashTransfer',id})),before);
+});
+test('Position transfers are recorded like A and do not move inventory',()=>{
+ const raw=fixture(),lots=d=>JSON.stringify(projectLedger(d,who,pid).lots.map(l=>[l.source,l.account,l.qty]));
+ const f={code:'sec-0050',from:'review-a',to:'review-b',date:taipeiToday(),shares:100,basis:10000,note:''};
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertPositionTransfer',fields:{...f,shares:1.5}}),/正整數/);
+ const next=buildOperation(raw,who,pid,{kind:'upsertPositionTransfer',fields:f}),id=next.positionTransfers[0].id;
+ assert.equal(lots(next),lots(raw));assert.equal(projectLedger(next,who,pid).positions[0].basis,10000);
+ assert.equal(buildOperation(next,who,pid,{kind:'upsertPositionTransfer',id,fields:{...f,shares:50}}).positionTransfers[0].shares,50);
+ assert.equal(buildOperation(next,who,pid,{kind:'deletePositionTransfer',id}).positionTransfers.length,0);
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'deleteSecurity',id:'sec-0050'}),/不能刪除/);
+});
+test('Ledger structure: portfolios, broker accounts, fees and settings',()=>{
+ const raw=fixture();
+ const p=buildOperation(raw,who,pid,{kind:'upsertPortfolio',fields:{name:'第二本帳'}}),newPid=p.portfolios.at(-1).id;
+ assert.ok(projectLedger(p,who,pid).portfolios.some(x=>x.name==='第二本帳'));
+ assert.equal(projectLedger(p,who,newPid).portfolioId,newPid,'new portfolio can be opened');
+ assert.equal(buildOperation(p,who,pid,{kind:'upsertPortfolio',id:pid,fields:{name:'改名'}}).portfolios.find(x=>x.id===pid).name,'改名');
+ const a=buildOperation(raw,who,pid,{kind:'upsertBrokerAccount',fields:{brokerId:'broker-fubon',name:'富邦',isDefault:true}}),acc=a.brokerAccounts.at(-1);
+ assert.equal(acc.brokerId,'broker-fubon');assert.equal(a.brokerAccounts.filter(x=>x.portfolioId===pid&&x.isDefault).length,1);
+ assert.ok(projectLedger(a,who,pid).accounts.some(x=>x.id===acc.id));
+ const off=buildOperation(a,who,pid,{kind:'upsertBrokerAccount',id:acc.id,fields:{name:'富邦',active:false}});
+ assert.equal(projectLedger(off,who,pid).accounts.some(x=>x.id===acc.id),false,'inactive accounts leave the pickers');
+ assert.equal(buildOperation(a,who,pid,{kind:'deleteBrokerAccount',id:acc.id}).brokerAccounts.some(x=>x.id===acc.id),false);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'deleteBrokerAccount',id:'review-a'}),/停用/);
+ const broker=raw.brokerAccounts.find(x=>x.id==='review-a').brokerId,cost=d=>estimateCosts(d,who,pid,{type:'buy',account:'review-a',code:'sec-0050',price:100,qty:1000});
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'saveBrokerFees',fields:{brokerId:broker,feeRate:1.425,discountRate:0.28,minFee:1,stockSellTaxRate:0.003,etfSellTaxRate:0.001}}),/小數/);
+ const fees=buildOperation(raw,who,pid,{kind:'saveBrokerFees',fields:{brokerId:broker,feeRate:0.001425,discountRate:0.6,minFee:20,stockSellTaxRate:0.003,etfSellTaxRate:0.001}});
+ assert.equal(cost(fees).fee,Math.max(20,Math.floor(100000*0.001425*0.6)));assert.notEqual(cost(fees).fee,cost(raw).fee);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'saveSettings',fields:{defaultSecurity:'9999',defaultRebuyOffset:0.5,coreHoldingShares:0,priceTolerance:0,amountTolerance:5,feeAllocationMethod:'BY_SHARES'}}),/清單/);
+ const set=buildOperation(raw,who,pid,{kind:'saveSettings',fields:{defaultSecurity:'0050',defaultRebuyOffset:1,coreHoldingShares:2000,priceTolerance:0.05,amountTolerance:5,feeAllocationMethod:'BY_SHARES'}});
+ assert.equal(projectLedger(set,who,pid).settings.defaultRebuyOffset,1);assert.equal(set.auditLogs.at(-1).entityType,'portfolio_settings');
+});
+test('Securities can be edited, and deleted only when unused',()=>{
+ const raw=buildOperation(fixture(),who,pid,{kind:'createSecurity',fields:{symbol:'2317',name:'鴻海'}}),sec=raw.securities.at(-1);
+ const ed=buildOperation(raw,who,pid,{kind:'updateSecurity',id:sec.id,fields:{symbol:'2317',name:'鴻海精密',market:'TW',yahooSymbol:'2317.TW',assetType:'STOCK'}});
+ assert.equal(ed.securities.at(-1).name,'鴻海精密');
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'updateSecurity',id:sec.id,fields:{symbol:'0050'}}),/已存在/);
+ assert.equal(buildOperation(raw,who,pid,{kind:'deleteSecurity',id:sec.id}).securities.some(x=>x.id===sec.id),false);
+ assert.equal(projectLedger(raw,who,pid).stocks[sec.id].used,false);assert.equal(projectLedger(raw,who,pid).stocks['sec-0050'].used,true);
+});
+test('First use: B creates a new ledger only where none exists',async()=>{
+ const raw=starterLedger(who,{portfolioName:'我的帳本',brokerId:'broker-fubon',accountName:'富邦主帳戶'}),m=projectLedger(raw,who,'');
+ assert.equal(m.portfolios[0].name,'我的帳本');assert.equal(m.accounts.length,2);assert.equal(m.trades.length,0);assert.ok(m.defaultCode);
+ const docs=new Map(),sdkA=mockSdk(docs),c=await createLedgerClient({}, {sdk:sdkA.sdk});
+ await assert.rejects(c.reload(),{code:'stockbook/no-ledger'});
+ const model=await c.createLedger({portfolioName:'我的帳本',brokerId:'broker-cathay',accountName:'主帳戶'});
+ assert.equal(model.portfolios[0].name,'我的帳本');assert.equal(docs.get(head).ownerUid,who.uid);assert.equal(docs.get(head).ownerEmail,who.email);
+ const acct=model.accounts.find(a=>a.id!=='all').id,after=await c.commit({kind:'upsertCash',fields:{cashType:'DEPOSIT',account:acct,date:taipeiToday(),amount:5000}});
+ assert.equal(after.cash[acct],5000);
+ await assert.rejects(c.createLedger({}),{code:'stockbook/exists'});
+ // A denied read (rules cannot read a missing document) falls back to a create-only write.
+ const docs2=new Map(),m2=mockSdk(docs2);let first=true;const real=m2.sdk[2].runTransaction;
+ m2.sdk[2].runTransaction=async(db,fn)=>{if(first){first=false;throw Object.assign(new Error('denied'),{code:'permission-denied'});}return real(db,fn);};
+ const c2=await createLedgerClient({}, {sdk:m2.sdk});await c2.createLedger({});assert.ok(docs2.get(head));
 });

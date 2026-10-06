@@ -1,4 +1,4 @@
-import { projectLedger, buildOperation, estimateCosts, sellOptions, borrowOptions, exchangePreview } from './model.js';
+import { projectLedger, buildOperation, estimateCosts, sellOptions, borrowOptions, exchangePreview, starterLedger } from './model.js';
 import {createNativeAuth,nativeAuthError} from './native-auth.js';
 const SDK='https://www.gstatic.com/firebasejs/10.12.5/';
 export function namespaceFor(email,custom=''){const value=String(custom||String(email||'').toLowerCase()).trim().replace(/[^a-zA-Z0-9._-]/g,'_');if(!value)throw new Error('找不到帳本名稱。');return value;}
@@ -12,6 +12,7 @@ export async function decodeLedger(payload){
  const binary=atob(payload),bytes=Uint8Array.from(binary,c=>c.charCodeAt(0));
  return JSON.parse(await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text());
 }
+export function noLedgerError(){const e=new Error('這個帳號還沒有雲端帳本。可以在 B 版建立新帳本，或確認自訂帳本名稱。');e.code='stockbook/no-ledger';return e;}
 export function conflictError(){const e=new Error('A 版或其他裝置已更新帳本。這次未儲存；請重新載入最新資料後再修改。');e.code='stockbook/conflict';return e;}
 export function errorText(error){
  const code=String(error?.code||'');
@@ -33,7 +34,7 @@ export async function createLedgerClient(config,{sdk:injected=null,onAuthChange=
  async function readSnapshot(ns){
   return firestoreModule.runTransaction(db,async tx=>{
    const headRef=firestoreModule.doc(db,'stockLedgers',ns),head=await tx.get(headRef);
-   if(!head.exists())throw new Error('找不到原本的雲端帳本。請先在 A 版同步，或確認自訂帳本名稱；B 版不會建立空白帳本覆蓋資料。');
+   if(!head.exists())throw noLedgerError();
    const main=head.data();
    if(main.state){if(typeof main.state!=='object')throw new Error('雲端帳本格式不正確。');return {ns,main,chunks:[],payload:main.state};}
    if(!Number.isInteger(main.chunkCount)||main.chunkCount<1||main.chunkCount>200)throw new Error('帳本資料區塊數量不正確。');
@@ -50,6 +51,23 @@ export async function createLedgerClient(config,{sdk:injected=null,onAuthChange=
   if(ticket!==epoch||auth.currentUser?.uid!==who.uid)throw new Error('登入狀態已改變，請重新載入。');
   baseline=shot;raw=next;model=projected;customNamespace=namespace;
   return model;
+ }
+ // First use: write a new ledger only where none exists. A ledger this account owns is always readable (firestore.rules),
+ // so a denied read means there is nothing of ours to overwrite; the create rule then rejects anything owned by someone else.
+ async function createLedger(options={}){
+  if(busy)throw new Error('正在儲存，請稍候。');
+  const who=identity(),wanted=options.namespace??customNamespace,ns=namespaceFor(who.email,wanted),headRef=firestoreModule.doc(db,'stockLedgers',ns);
+  const raw0=starterLedger(who,options),payload=await compressLedger(raw0),updatedAt=new Date().toISOString(),bRevision=crypto.randomUUID();
+  const main={namespace:ns,ownerUid:who.uid,ownerEmail:who.email,updatedAt,chunkCount:1,isCompressed:true,bRevision};
+  if(payload.length>800000)throw new Error('新帳本資料異常，未建立。');
+  busy=true;
+  try{
+   let readable=true;
+   try{await firestoreModule.runTransaction(db,async tx=>{const head=await tx.get(headRef);if(head.exists())throw Object.assign(new Error('雲端已經有這個帳本，請重新載入，不會建立新帳本。'),{code:'stockbook/exists'});tx.set(headRef,main);tx.set(refs(ns,1)[0],{index:0,data:payload,ownerUid:who.uid,updatedAt});});}
+   catch(error){if(!String(error?.code||'').includes('permission-denied'))throw error;readable=false;}
+   if(!readable)await firestoreModule.runTransaction(db,async tx=>{tx.set(headRef,main);tx.set(refs(ns,1)[0],{index:0,data:payload,ownerUid:who.uid,updatedAt});});
+  }finally{busy=false;}
+  return reload({namespace:wanted});
  }
  async function commit(operation){
   if(busy)throw new Error('正在儲存，請勿重複送出。');
@@ -95,7 +113,7 @@ export async function createLedgerClient(config,{sdk:injected=null,onAuthChange=
   },
   async signIn(redirect=false){const provider=new authModule.GoogleAuthProvider();provider.setCustomParameters({prompt:'select_account'});if(redirect)return authModule.signInWithRedirect(auth,provider);return authModule.signInWithPopup(auth,provider);},
   async signOut(){epoch++;baseline=null;raw=null;model=null;return authModule.signOut(auth);},
-  reload,commit,
+  reload,commit,createLedger,
   view(){return model;},
   select(portfolioId,account='all'){if(!raw)throw new Error('請先載入帳本。');model=projectLedger(raw,identity(),portfolioId,account);model.updatedAt=baseline?.main.updatedAt||'';return model;},
   costs(fields){if(!raw||!model)return {fee:0,tax:0};return estimateCosts(raw,identity(),model.portfolioId,fields);},
