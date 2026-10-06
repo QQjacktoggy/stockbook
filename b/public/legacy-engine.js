@@ -3322,6 +3322,7 @@ export async function mobileBackupEnvelope(raw,identity,portfolioId,source='LOCA
   return createBackupEnvelope(source);
 }
 export async function mobileParseBackup(parsed) {return parseBackupDocument(parsed);}
+export function mobileExecutionChecksum(execution) {return brokerExecutionChecksum(execution);}
 export function mobileContentCount(data) {
   return ['appTransactions','brokerExecutions','accountTransfers','positionTransfers','inventoryCostExchanges','importBatches'].reduce((s,k)=>s+((data&&data[k])||[]).length,0);
 }
