@@ -2,7 +2,7 @@ import test from 'node:test';
 // Core transaction and SDK boundary tests use synthetic fixtures only.
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {projectLedger,buildOperation,sellOptions,taipeiToday} from '../public/model.js';
+import {projectLedger,buildOperation,sellOptions,taipeiToday,minimalLots,CATEGORIES} from '../public/model.js';
 import {createLedgerClient,namespaceFor,compressLedger,decodeLedger} from '../public/cloud-client.js';
 const original=JSON.parse(readFileSync(new URL('./fixture.json',import.meta.url)));
 const who={uid:'fake-uid',email:'review@example.test',emailVerified:true,displayName:'測試'};
@@ -129,4 +129,20 @@ test('Signout while transaction reads are pending cancels before any mutations',
  m.sdk[2].runTransaction=async(db,fn)=>run(db,tx=>fn({...tx,get:async ref=>{const result=await tx.get(ref);if(ref===head){reached();await gate;}return result;}}));
  const rejected=assert.rejects(c.commit({kind:'upsertTransaction',fields:fields()}),/登入狀態/);
  await paused;await c.signOut();release();await rejected;assert.equal(m.writes,0);
+});
+
+test('Sell without chosen lots takes just enough lots, high price first',()=>{
+ const raw=fixture(),options=sellOptions(raw,who,pid,fields({type:'sell'}));
+ assert.ok(options.length>1,'fixture offers several lots');
+ const saved=buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({type:'sell',qty:10})});
+ const sell=saved.appTransactions.at(-1);
+ assert.equal(sell.linkedBuyTransactionId,options[0].value);
+ assert.deepEqual(minimalLots(options,options[0].shares+1).map(o=>o.value),options.slice(0,2).map(o=>o.value));
+});
+test('Editing a trade saves the chosen category, including CORE',()=>{
+ const raw=fixture(),old=projectLedger(raw,who,pid).trades.find(t=>t.id==='demo-buy-pm');
+ const edit=category=>buildOperation(raw,who,pid,{kind:'upsertTransaction',id:old.id,fields:fields({type:'buy',account:old.account,code:old.code,date:old.date,time:old.time,qty:old.qty,price:old.price,fee:old.fee,tax:old.tax,note:old.note,category})}).appTransactions.find(t=>t.id===old.id).strategyCategory;
+ assert.ok(CATEGORIES.includes('CORE'));
+ assert.equal(edit('CORE'),'CORE');assert.equal(edit('TRADING'),'TRADING');
+ assert.equal(edit('NOT_A_CATEGORY'),raw.appTransactions.find(t=>t.id===old.id).strategyCategory||'LONG_TERM');
 });

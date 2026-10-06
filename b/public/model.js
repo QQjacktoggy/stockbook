@@ -16,6 +16,9 @@ export function projectLedger(raw,identity,portfolioId='',account='all'){
  const reconciliation=scoped(data,pid,'reconciliationLinks').map(l=>({...l,key:acceptanceKey(l),settled:['MATCHED','AUTO_GROUP_MATCHED'].includes(l.matchStatus)||!!l.brokerAcceptedAt}));
  return {schema:2,account,cash,lots,trades,stocks,accounts,rebuy,reconciliation,portfolioId:pid,portfolios:evaluated.portfolios.map(p=>({id:p.id,name:p.name||p.portfolioName||'投資帳本'})),user:{id:user.id,name:identity.displayName||user.name||user.email,email:identity.email},updatedAt:'',raw:data};
 }
+export const CATEGORIES=['LONG_TERM','TRADING','CORE','REBUY'];
+// Like A's quick sell: when no lots are chosen, take just enough lots in the offered (high price first) order.
+export function minimalLots(options,qty){const out=[];let left=num(qty);for(const o of options){if(left<=0)break;out.push(o);left-=num(o.shares);}return out;}
 export function estimateCosts(raw,identity,portfolioId,fields){
  const {data}=evaluateLedger(raw,identity,portfolioId),account=data.brokerAccounts.find(a=>a.id===fields.account),security=data.securities.find(s=>s.id===fields.code);
  return mobileCosts(data,fields.type==='sell'?'SELL':'BUY',num(fields.price),num(fields.qty),account?.brokerId,security);
@@ -73,7 +76,7 @@ export function buildOperation(raw,identity,portfolioId,op){
    if(type==='SELL'&&(!old||financialChanged)){
     const options=mobileSellOptions(data,account.id,security.symbol,f.date,old?.id||'');
     const requested=String(f.sources||'').split(',').filter(Boolean);
-    const chosen=Object.hasOwn(f,'sources')?requested.map(id=>options.find(l=>l.value===id)):options;
+    const chosen=Object.hasOwn(f,'sources')?requested.map(id=>options.find(l=>l.value===id)):minimalLots(options,qty);
     if(chosen.some(x=>!x)||new Set(chosen.map(x=>x.value)).size!==chosen.length)throw new Error('選擇的庫存無效，請重新檢查。');
     const available=chosen.reduce((s,l)=>s+num(l.shares),0);
     if(qty>available)throw new Error('成交日期前選定庫存可賣 '+available+' 股，請調整股數或庫存。');
@@ -86,7 +89,7 @@ export function buildOperation(raw,identity,portfolioId,op){
     if(qty*price+fee+tax>cash+restored)throw new Error('帳上現金不足，請先在 A 版記錄入金或調整金額。');
    }
    entityId=old?.id||'tx-b-'+crypto.randomUUID();
-   after={...(old||{sourceType:'MANUAL',buyIntent:type==='BUY'?'NEW':'',borrowRebuyType:'',rebuySellTransactionIds:'',sourceInventoryLotId:'',rebuyCycleId:''}),id:entityId,userId:user.id,portfolioId:pid,brokerId:account.brokerId,brokerAccountId:account.id,securityId:security.id,transactionType:type,tradeDate:f.date,tradeTime:f.time||'',price,shares:qty,fee,tax,grossAmount:qty*price,netAmount:type==='BUY'?-(qty*price+fee+tax):qty*price-fee-tax,strategyCategory:old?.strategyCategory||f.category||'LONG_TERM',linkedBuyTransactionId:type==='SELL'?sources:'',note:String(f.note||'').slice(0,4000),createdAt:old?.createdAt||now,updatedAt:now};
+   after={...(old||{sourceType:'MANUAL',buyIntent:type==='BUY'?'NEW':'',borrowRebuyType:'',rebuySellTransactionIds:'',sourceInventoryLotId:'',rebuyCycleId:''}),id:entityId,userId:user.id,portfolioId:pid,brokerId:account.brokerId,brokerAccountId:account.id,securityId:security.id,transactionType:type,tradeDate:f.date,tradeTime:f.time||'',price,shares:qty,fee,tax,grossAmount:qty*price,netAmount:type==='BUY'?-(qty*price+fee+tax):qty*price-fee-tax,strategyCategory:CATEGORIES.includes(f.category)?f.category:(old?.strategyCategory||'LONG_TERM'),linkedBuyTransactionId:type==='SELL'?sources:'',note:String(f.note||'').slice(0,4000),createdAt:old?.createdAt||now,updatedAt:now};
    if(old)next.appTransactions=next.appTransactions.map(t=>t.id===old.id?after:t);else next.appTransactions.push(after);
    action=old?'UPDATE_TRANSACTION':'CREATE_TRANSACTION';
   }else throw new Error('不支援的帳本操作。');
