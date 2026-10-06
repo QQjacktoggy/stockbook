@@ -1443,6 +1443,291 @@ function calculateInventoryCostExchangePlan(sourceLot, externalPriceInput, targe
   };
 }
 
+// Ported unchanged from A public/app.js for B phase 4 (CSV and JSON import).
+function stripBom(text) {
+  return String(text || "").replace(/^\uFEFF/, "");
+}
+
+function parseCsv(text) {
+  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  return lines.map((line) => {
+    const cells = [];
+    let current = "";
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i += 1) {
+      const char = line[i];
+      const next = line[i + 1];
+      if (char === '"' && inQuotes && next === '"') {
+        current += '"';
+        i += 1;
+      } else if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === "," && !inQuotes) {
+        cells.push(current.trim());
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+    cells.push(current.trim());
+    return cells;
+  });
+}
+
+function parseBrokerCsv(text) {
+  const rows = parseCsv(stripBom(text));
+  const headerRowIndex = rows.findIndex((cells) => cells.includes("股名") && cells.includes("日期") && cells.includes("成交股數"));
+  if (headerRowIndex < 0) throw new Error("找不到券商 CSV header");
+  const headers = rows[headerRowIndex].map((cell) => cell.trim());
+  const dataRows = rows
+    .slice(headerRowIndex + 1)
+    .filter((cells) => cells.some((cell) => String(cell || "").trim()))
+    .map((cells) => {
+      const row = {};
+      headers.forEach((header, index) => {
+        row[header] = cells[index] ?? "";
+      });
+      return row;
+    });
+  return { rows: dataRows, headerRowIndex };
+}
+
+function findSymbolInRow(row) {
+  const keys = Object.keys(row);
+  const symbolKey = keys.find((k) => ["股號", "股票代號", "股票代碼", "商品代號", "代號", "symbol", "code", "stockNo"].includes(String(k).trim()));
+  if (symbolKey) return String(row[symbolKey] || "").trim();
+  return null;
+}
+
+function mapBrokerRow(row, context) {
+  const securityName = String(row["股名"] || "").trim();
+  
+  let symbol = findSymbolInRow(row);
+  if (!symbol) symbol = inferSymbol(securityName);
+  
+  if (!symbol || symbol === "UNKNOWN") {
+    symbol = securityName ? `UNKNOWN_${simpleHash(securityName)}` : securityById(context.securityId)?.symbol || "UNKNOWN";
+  }
+  
+  const security = ensureSecurity(symbol, securityName);
+  const sideRaw = String(row["買賣別"] || "").trim();
+  return {
+    securityId: security.id,
+    securityName,
+    tradeDate: parseDate(row["日期"]),
+    shares: toNumber(row["成交股數"]),
+    netAmount: toNumber(row["淨收付金額"]),
+    side: normalizeSide(sideRaw),
+    brokerSideRaw: sideRaw,
+    price: toNumber(row["成交價"]),
+    grossAmount: toNumber(row["成本"]),
+    fee: toNumber(row["手續費"]),
+    tax: toNumber(row["交易稅"]),
+    orderNo: String(row["委託書號"] || "").trim()
+  };
+}
+
+function importBrokerCsv(text, context) {
+  const parsed = parseBrokerCsv(text);
+  const batch = createImportBatch(context, "BROKER_CSV", parsed.rows.length);
+  const existingKeys = new Set(
+    state.brokerExecutions
+      .filter((execution) => execution.userId === context.userId && execution.portfolioId === context.portfolioId)
+      .map((execution) => execution.checksum)
+  );
+  parsed.rows.forEach((row, index) => {
+    const rawRow = {
+      id: makeId("raw"),
+      importBatchId: batch.id,
+      rowNumber: parsed.headerRowIndex + index + 2,
+      rawJson: row,
+      parseStatus: "PARSED",
+      parseError: "",
+      createdAt: nowIso()
+    };
+    state.rawImportRows.push(rawRow);
+    const mapped = mapBrokerRow(row, context);
+    const checksum = brokerExecutionChecksum(mapped);
+    if (existingKeys.has(checksum)) {
+      rawRow.parseStatus = "DUPLICATE";
+      rawRow.parseError = "重複券商成交，已略過";
+      noteImportBatchDuplicate(batch, mapped.tradeDate);
+      return;
+    }
+    state.brokerExecutions.push({
+      id: makeId("broker-exec"),
+      userId: context.userId,
+      portfolioId: context.portfolioId,
+      brokerId: context.brokerId,
+      brokerAccountId: context.brokerAccountId,
+      securityId: mapped.securityId,
+      importBatchId: batch.id,
+      brokerName: brokerName(context.brokerId),
+      tradeDate: mapped.tradeDate,
+      settlementDate: mapped.tradeDate,
+      securityName: mapped.securityName,
+      side: mapped.side,
+      brokerSideRaw: mapped.brokerSideRaw,
+      shares: mapped.shares,
+      price: mapped.price,
+      grossAmount: mapped.grossAmount,
+      fee: mapped.fee,
+      tax: mapped.tax,
+      netAmount: mapped.netAmount,
+      orderNo: mapped.orderNo,
+      executionNo: "",
+      rawRowId: rawRow.id,
+      checksum,
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    });
+    existingKeys.add(checksum);
+    noteImportBatchCreated(batch, mapped.tradeDate);
+  });
+  finalizeImportBatch(batch);
+  auditLog("IMPORT", "import_batch", batch.id, null, batch, context.portfolioId);
+}
+
+function importJsonLedger(text, context) {
+  const records = JSON.parse(stripBom(text));
+  if (!Array.isArray(records)) throw new Error("JSON 必須是 array");
+  const batch = createImportBatch(context, "JSON_LEDGER", records.length);
+  const sourceIds = new Set(
+    state.appTransactions
+      .filter((tx) => tx.userId === context.userId && tx.portfolioId === context.portfolioId)
+      .map((tx) => tx.sourceTransactionId || tx.id)
+  );
+  records.forEach((record, index) => {
+    const rawRow = {
+      id: makeId("raw"),
+      importBatchId: batch.id,
+      rowNumber: index + 1,
+      rawJson: record,
+      parseStatus: "PARSED",
+      parseError: "",
+      createdAt: nowIso()
+    };
+    state.rawImportRows.push(rawRow);
+    const sourceTransactionId = String(record.id || makeId("source"));
+    const tradeDate = parseDate(record.date);
+    if (sourceIds.has(sourceTransactionId)) {
+      rawRow.parseStatus = "DUPLICATE";
+      rawRow.parseError = "重複 JSON 交易，已略過";
+      noteImportBatchDuplicate(batch, tradeDate);
+      return;
+    }
+    const security = record.symbol ? ensureSecurity(record.symbol, record.securityName || record.name || record.symbol) : securityById(context.securityId);
+    const account = state.brokerAccounts.find((item) => item.id === context.brokerAccountId);
+    state.appTransactions.push(
+      normalizeTransaction({
+        id: makeId("tx"),
+        userId: context.userId,
+        portfolioId: context.portfolioId,
+        brokerId: context.brokerId,
+        brokerAccountId: context.brokerAccountId,
+        securityId: security.id,
+        sourceTransactionId,
+        sourceType: "JSON_IMPORT",
+        importBatchId: batch.id,
+        tradeDate,
+        transactionType: normalizeType(record.type),
+        strategyCategory: record.category || "TRADING",
+        price: toNumber(record.price),
+        shares: toNumber(record.shares),
+        fee: toNumber(record.fee),
+        tax: toNumber(record.tax),
+        linkedBuyTransactionId: String(record.linkedBuyId || ""),
+        note: String(record.note || ""),
+        isConfirmed: true,
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+        brokerNameSnapshot: brokerName(account.brokerId)
+      })
+    );
+    sourceIds.add(sourceTransactionId);
+    noteImportBatchCreated(batch, tradeDate);
+  });
+  finalizeImportBatch(batch);
+  auditLog("IMPORT", "import_batch", batch.id, null, batch, context.portfolioId);
+}
+
+function createImportBatch(context, sourceType, rowCount) {
+  const batch = {
+    id: makeId("import"),
+    userId: context.userId,
+    portfolioId: context.portfolioId,
+    brokerId: context.brokerId,
+    brokerAccountId: context.brokerAccountId,
+    importTemplateId: sourceType === "BROKER_CSV" ? DEFAULT_TEMPLATE.id : "",
+    sourceType,
+    sourceFilename: context.sourceFilename,
+    importedAt: nowIso(),
+    rowCount,
+    parsedCount: 0,
+    createdCount: 0,
+    duplicateCount: 0,
+    failedCount: 0,
+    dateFrom: "",
+    dateTo: "",
+    status: "PENDING",
+    checksum: simpleHash(`${context.sourceFilename}:${rowCount}:${Date.now()}`),
+    notes: "",
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  };
+  state.importBatches.push(batch);
+  return batch;
+}
+
+function noteImportBatchCreated(batch, tradeDate) {
+  batch.createdCount = toNumber(batch.createdCount) + 1;
+  batch.parsedCount = toNumber(batch.parsedCount) + 1;
+  updateImportBatchDateRange(batch, tradeDate);
+}
+
+function noteImportBatchDuplicate(batch, tradeDate) {
+  batch.duplicateCount = toNumber(batch.duplicateCount) + 1;
+  batch.parsedCount = toNumber(batch.parsedCount) + 1;
+  updateImportBatchDateRange(batch, tradeDate);
+}
+
+function updateImportBatchDateRange(batch, tradeDate) {
+  const date = parseDate(tradeDate);
+  if (!date) return;
+  if (!batch.dateFrom || date < batch.dateFrom) batch.dateFrom = date;
+  if (!batch.dateTo || date > batch.dateTo) batch.dateTo = date;
+}
+
+function finalizeImportBatch(batch) {
+  if (toNumber(batch.createdCount) <= 0 && toNumber(batch.duplicateCount) > 0) batch.status = "DUPLICATE";
+  else if (toNumber(batch.duplicateCount) > 0) batch.status = "PARTIAL_DUPLICATE";
+  else batch.status = "PARSED";
+  batch.updatedAt = nowIso();
+}
+
+function parseDatasetIds(value) {
+  return String(value || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+}
+
+function clearAcceptedBrokerDiffsForDeletedData(deletedExecutionIds, deletedTransactionIds) {
+  if (!state.acceptedBrokerDiffs || (!deletedExecutionIds.size && !deletedTransactionIds.size)) return;
+  const next = { ...(state.acceptedBrokerDiffs || {}) };
+  for (const link of state.reconciliationLinks || []) {
+    const executionIds = parseDatasetIds(link.brokerExecutionId || "");
+    const transactionIds = parseDatasetIds(link.appTransactionId || "");
+    const touchesDeletedExecution = executionIds.some((id) => deletedExecutionIds.has(id));
+    const touchesDeletedTransaction = transactionIds.some((id) => deletedTransactionIds.has(id));
+    if (touchesDeletedExecution || touchesDeletedTransaction) delete next[brokerDiffAcceptanceKey(link)];
+  }
+  state.acceptedBrokerDiffs = next;
+}
+
+// B writes its own audit entry for each operation (model.js), so A's per-step audit calls are no-ops here.
+function auditLog() {}
+
 export function evaluateLedger(raw, identity, portfolioId='') {
   if (!raw || !Array.isArray(raw.appTransactions)) throw new Error('帳本交易格式不正確，請先在 A 版同步。');
   state=normalizeState(structuredClone(raw));
@@ -1471,3 +1756,16 @@ export function mobileExchangeLots(data,portfolioId,accountId) {state=data;retur
 export function mobileExchangeEligible(lot) {return inventoryCostExchangeLotIsEligible(lot);}
 export function mobileExchangePlan(data,sourceLot,externalPrice,targets) {state=data;return calculateInventoryCostExchangePlan(sourceLot,externalPrice,targets);}
 export function mobileAssetType(symbol,name,value) {return normalizeSecurityAssetType(value||inferSecurityAssetType(symbol,name));}
+export function mobileImport(raw,identity,portfolioId,{accountId,text,sourceType,filename}) {
+  const {user,portfolioId:pid}=evaluateLedger(raw,identity,portfolioId);
+  const account=state.brokerAccounts.find((item)=>item.id===accountId&&item.portfolioId===pid&&item.isActive!==false);
+  if (!account) throw new Error('請選擇這份帳本的券商帳戶。');
+  const symbol=getPortfolioSettings(pid).defaultSecurity||'0050';
+  const security=ensureSecurity(symbol,symbol);
+  const context={userId:user.id,portfolioId:pid,brokerId:account.brokerId,brokerAccountId:account.id,securityId:security.id,sourceFilename:String(filename||'')};
+  const count=state.importBatches.length;
+  if (sourceType==='JSON_LEDGER') importJsonLedger(text,context); else importBrokerCsv(text,context);
+  if (state.importBatches.length!==count+1) throw new Error('匯入失敗，未建立批次。');
+  return state;
+}
+export function mobileClearAcceptedDiffs(data,executionIds,transactionIds) {state=data;clearAcceptedBrokerDiffsForDeletedData(executionIds,transactionIds);return state.acceptedBrokerDiffs;}

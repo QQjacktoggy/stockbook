@@ -1,4 +1,4 @@
-import { evaluateLedger, mobileInventory, mobileAmounts, mobileBasis, mobileSellOptions, mobileCosts, acceptanceKey, mobileNormalizeTransaction, mobileSettings, mobileBorrowOptions, mobileValidateBorrow, mobileExchangeLots, mobileExchangeEligible, mobileExchangePlan, mobileAssetType } from './legacy-engine.js';
+import { evaluateLedger, mobileInventory, mobileAmounts, mobileBasis, mobileSellOptions, mobileCosts, acceptanceKey, mobileNormalizeTransaction, mobileSettings, mobileBorrowOptions, mobileValidateBorrow, mobileExchangeLots, mobileExchangeEligible, mobileExchangePlan, mobileAssetType, mobileImport, mobileClearAcceptedDiffs } from './legacy-engine.js';
 export function taipeiToday(now=new Date()){return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(now);}
 function num(v){return Number(v)||0;}
 const clone=x=>structuredClone(x);
@@ -26,8 +26,10 @@ export function projectLedger(raw,identity,portfolioId='',account='all'){
  const brokers=data.brokers.filter(b=>b.isActive!==false).map(b=>({id:b.id,name:b.name,fees:{feeRate:0.001425,discountRate:0.28,minFee:1,stockSellTaxRate:0.003,etfSellTaxRate:0.001,...(settings.brokerFees||{})[b.id]}}));
  const securitiesUsed=new Set([...data.appTransactions,...data.brokerExecutions,...data.positionTransfers].map(x=>x.securityId));
  for(const id of Object.keys(stocks))stocks[id].used=securitiesUsed.has(id);
+ const batches=scoped(data,pid,'importBatches').map(b=>({id:b.id,filename:b.sourceFilename||'',sourceType:b.sourceType||'',importedAt:b.importedAt||b.createdAt||'',rows:num(b.rowCount),created:num(b.createdCount),duplicate:num(b.duplicateCount),from:b.dateFrom||'',to:b.dateTo||'',status:b.status||'',account:b.brokerAccountId,executions:data.brokerExecutions.filter(x=>x.importBatchId===b.id).length,transactions:data.appTransactions.filter(t=>t.importBatchId===b.id).length})).sort((a,b)=>String(b.importedAt).localeCompare(String(a.importedAt)));
+ const templates=(data.importTemplates||[]).map(t=>({id:t.id,name:t.templateName||t.id,brokerId:t.brokerId,isDefault:!!t.isDefault||t.id==='tpl-cathay-default',mapping:t.columnMapping||{}}));
  const reconciliation=scoped(data,pid,'reconciliationLinks').map(l=>({...l,key:acceptanceKey(l),settled:['MATCHED','AUTO_GROUP_MATCHED'].includes(l.matchStatus)||!!l.brokerAcceptedAt}));
- return {schema:2,cycles,matches,exchanges,allAccounts,transfers,positions,brokers,settings:{defaultSecurity:settings.defaultSecurity,defaultRebuyOffset:num(settings.defaultRebuyOffset),coreHoldingShares:num(settings.coreHoldingShares),priceTolerance:num(settings.priceTolerance),amountTolerance:num(settings.amountTolerance),feeAllocationMethod:settings.feeAllocationMethod},defaultCode:(data.securities.find(s=>String(s.symbol||'').toUpperCase()===String(mobileSettings(data,pid).defaultSecurity||'0050').toUpperCase())||{}).id||'',account,cash,lots,trades,stocks,accounts,rebuy,reconciliation,portfolioId:pid,portfolios:evaluated.portfolios.map(p=>({id:p.id,name:p.name||p.portfolioName||'投資帳本'})),user:{id:user.id,name:identity.displayName||user.name||user.email,email:identity.email},updatedAt:'',raw:data};
+ return {schema:2,batches,templates,cycles,matches,exchanges,allAccounts,transfers,positions,brokers,settings:{defaultSecurity:settings.defaultSecurity,defaultRebuyOffset:num(settings.defaultRebuyOffset),coreHoldingShares:num(settings.coreHoldingShares),priceTolerance:num(settings.priceTolerance),amountTolerance:num(settings.amountTolerance),feeAllocationMethod:settings.feeAllocationMethod},defaultCode:(data.securities.find(s=>String(s.symbol||'').toUpperCase()===String(mobileSettings(data,pid).defaultSecurity||'0050').toUpperCase())||{}).id||'',account,cash,lots,trades,stocks,accounts,rebuy,reconciliation,portfolioId:pid,portfolios:evaluated.portfolios.map(p=>({id:p.id,name:p.name||p.portfolioName||'投資帳本'})),user:{id:user.id,name:identity.displayName||user.name||user.email,email:identity.email},updatedAt:'',raw:data};
 }
 export const CATEGORIES=['LONG_TERM','TRADING','CORE','REBUY'];
 // Like A's quick sell: when no lots are chosen, take just enough lots in the offered (high price first) order.
@@ -110,10 +112,15 @@ export function buildOperation(raw,identity,portfolioId,op){
  const next=clone(raw),now=new Date().toISOString();next.appTransactions=next.appTransactions||[];
  let before=null,after=null,entityId='',action='',entityType='transaction';
  if(op.kind==='acceptReconciliation'){
-  const link=data.reconciliationLinks.find(l=>acceptanceKey(l)===op.key&&l.portfolioId===pid);
-  if(!link||!['FEE_TAX_DIFF','AMOUNT_DIFF'].includes(link.matchStatus)||!link.brokerExecutionId||link.brokerAcceptedAt)throw new Error('這筆對帳差異已改變，請重新載入。');
-  next.acceptedBrokerDiffs={...(next.acceptedBrokerDiffs||{}),[op.key]:now};
-  action='ACCEPT_BROKER_AMOUNTS';entityType='reconciliation';entityId=op.key;after={acceptedAt:now};
+  // One key (檢查 → 採用) or several (A's 採用券商金額 for every pending fee/amount difference).
+  const keys=[...new Set(op.keys||[op.key])];
+  for(const key of keys){
+   const link=data.reconciliationLinks.find(l=>acceptanceKey(l)===key&&l.portfolioId===pid);
+   if(!link||!['FEE_TAX_DIFF','AMOUNT_DIFF'].includes(link.matchStatus)||!link.brokerExecutionId||link.brokerAcceptedAt)throw new Error('這筆對帳差異已改變，請重新載入。');
+  }
+  if(!keys.length)throw new Error('沒有可採用的差異。');
+  next.acceptedBrokerDiffs={...(next.acceptedBrokerDiffs||{}),...Object.fromEntries(keys.map(k=>[k,now]))};
+  action='ACCEPT_BROKER_AMOUNTS';entityType='reconciliation';entityId=keys.join(',');after={acceptedAt:now,count:keys.length};
  }else if(op.kind==='updateQuotes'){
   const rows=Array.isArray(op.quotes)?op.quotes:[];
   if(!rows.length)throw new Error('沒有可更新的報價。');
@@ -241,6 +248,49 @@ export function buildOperation(raw,identity,portfolioId,op){
    if(!['TW','TWO','US'].includes(market))throw new Error('市場請選上市、上櫃或美股。');
    after={...old,symbol,name,market,yahooSymbol:String(f.yahooSymbol||'').trim().toUpperCase(),assetType:mobileAssetType(symbol,name,f.assetType),updatedAt:now};
    next.securities=next.securities.map(x=>x.id===old.id?after:x);action='UPDATE';
+  }
+ }else if(op.kind==='importFile'){
+  // A's 匯入: broker CSV (國泰 format, duplicates skipped by checksum) or a JSON ledger. Only new records are appended.
+  const text=String(op.text||'');
+  if(!text.trim())throw new Error('檔案是空的。');
+  if(text.length>5000000)throw new Error('檔案太大（超過 5MB），請分批匯入。');
+  const imported=mobileImport(raw,identity,pid,{accountId:op.account,text,sourceType:op.sourceType==='JSON_LEDGER'?'JSON_LEDGER':'BROKER_CSV',filename:op.filename});
+  for(const key of ['securities','importBatches','rawImportRows','brokerExecutions','appTransactions']){
+   const have=new Set((next[key]||[]).map(x=>x.id));next[key]=[...(next[key]||[]),...imported[key].filter(x=>!have.has(x.id))];
+  }
+  const batch=imported.importBatches.at(-1);
+  action='IMPORT';entityType='import_batch';entityId=batch.id;after={sourceType:batch.sourceType,sourceFilename:batch.sourceFilename,rowCount:batch.rowCount,createdCount:batch.createdCount,duplicateCount:batch.duplicateCount};
+ }else if(op.kind==='deleteImportBatch'){
+  // Same scope as A's handleDeleteImportBatch: a CSV batch removes its broker records; a JSON batch also removes the trades it created.
+  const batch=(next.importBatches||[]).find(b=>b.id===op.id&&b.portfolioId===pid);
+  if(!batch)throw new Error('找不到這個匯入批次，請重新載入。');
+  const rows=(next.rawImportRows||[]).filter(r=>r.importBatchId===batch.id),jsonIds=new Set(rows.map(r=>String(r.rawJson?.id||'').trim()).filter(Boolean));
+  const execIds=new Set((next.brokerExecutions||[]).filter(x=>x.importBatchId===batch.id).map(x=>x.id));
+  const txIds=new Set(next.appTransactions.filter(t=>t.importBatchId===batch.id||(batch.sourceType==='JSON_LEDGER'&&t.sourceType==='JSON_IMPORT'&&jsonIds.has(t.sourceTransactionId||''))).map(t=>t.id));
+  const outside=next.appTransactions.find(t=>!txIds.has(t.id)&&['linkedBuyTransactionId','sourceInventoryLotId','rebuySellTransactionIds','rebuyCycleId'].some(k=>String(t[k]||'').split(/[,\s]+/).some(id=>txIds.has(id))));
+  if(outside)throw new Error('這批匯入的交易被 '+outside.tradeDate+' 的其他交易引用，請先處理那筆交易。');
+  const accepted=mobileClearAcceptedDiffs(data,execIds,txIds);
+  before={...clone(batch),acceptedBrokerDiffs:clone(next.acceptedBrokerDiffs||{})};
+  next.acceptedBrokerDiffs=accepted;
+  next.importBatches=next.importBatches.filter(b=>b.id!==batch.id);next.rawImportRows=(next.rawImportRows||[]).filter(r=>r.importBatchId!==batch.id);next.brokerExecutions=(next.brokerExecutions||[]).filter(x=>x.importBatchId!==batch.id);
+  if(txIds.size){next.appTransactions=next.appTransactions.filter(t=>!txIds.has(t.id));next.manualClosedRebuySellIds=(next.manualClosedRebuySellIds||[]).filter(id=>!txIds.has(id));}
+  action='DELETE';entityType='import_batch';entityId=batch.id;after={sourceType:batch.sourceType,brokerExecutionCount:execIds.size,appTransactionCount:txIds.size,rawRowCount:rows.length};
+ }else if(op.kind==='createTemplate'||op.kind==='deleteTemplate'){
+  next.importTemplates=Array.isArray(next.importTemplates)?next.importTemplates:clone(data.importTemplates||[]);
+  entityType='broker_import_template';
+  if(op.kind==='deleteTemplate'){
+   const t=next.importTemplates.find(x=>x.id===op.id);
+   if(!t)throw new Error('找不到這個模板。');
+   if(t.isDefault||t.id==='tpl-cathay-default')throw new Error('預設的國泰模板不能刪除。');
+   before=clone(t);next.importTemplates=next.importTemplates.filter(x=>x.id!==t.id);action='DELETE';entityId=t.id;
+  }else{
+   const f=op.fields||{},name=String(f.name||'').trim().slice(0,80),broker=data.brokers.find(b=>b.id===f.brokerId);
+   if(!name||!broker)throw new Error('請輸入模板名稱並選擇券商。');
+   let mapping=clone((data.importTemplates||[]).find(t=>t.id==='tpl-cathay-default')?.columnMapping||{});
+   if(String(f.mapping||'').trim()){try{mapping=JSON.parse(f.mapping);}catch{throw new Error('欄位對應要是 JSON，例如 {"tradeDate":"日期"}。');}if(!mapping||typeof mapping!=='object'||Array.isArray(mapping))throw new Error('欄位對應要是 JSON 物件。');}
+   entityId='tpl-b-'+crypto.randomUUID();
+   after={id:entityId,brokerId:broker.id,templateName:name,fileType:'CSV',encoding:'UTF-8-BOM',headerDetectionRule:'find mapped header',dateFormat:String(f.dateFormat||'YYYY/MM/DD'),numberFormat:'comma',sideBuyValues:['現買','買進'],sideSellValues:['現賣','賣出'],columnMapping:mapping,isDefault:false,createdAt:now,updatedAt:now};
+   next.importTemplates=[...next.importTemplates,after];action='CREATE';
   }
  }else if(op.kind==='updateMatch'){
   // A's "儲存配對": choose which buys a sell is matched to, and optionally match fewer shares.

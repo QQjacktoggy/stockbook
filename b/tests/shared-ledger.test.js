@@ -376,3 +376,38 @@ test('First use: B creates a new ledger only where none exists',async()=>{
  m2.sdk[2].runTransaction=async(db,fn)=>{if(first){first=false;throw Object.assign(new Error('denied'),{code:'permission-denied'});}return real(db,fn);};
  const c2=await createLedgerClient({}, {sdk:m2.sdk});await c2.createLedger({});assert.ok(docs2.get(head));
 });
+const CSV='﻿證券對帳單\n股名,日期,成交股數,淨收付金額,買賣別,成交價,成本,手續費,交易稅,委託書號\n元大台灣50,2026/09/29,"300","-30,012",現買,"100","30,000","12","0",A1\n元大台灣50,2026/09/30,"100","-10,509",現買,"105","10,500","9","0",A2\n元大台灣50,2026/09/25,"50","-5,002",現買,"100","5,000","2","0",A3\n';
+test('CSV import like A: records broker rows, skips duplicates, feeds reconciliation, and batches can be deleted',()=>{
+ const raw=fixture();
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'importFile',account:'review-a',text:'a,b\n1,2',filename:'x.csv'}),/header/);
+ const next=buildOperation(raw,who,pid,{kind:'importFile',account:'review-a',text:CSV,filename:'對帳單.csv'}),m=projectLedger(next,who,pid);
+ assert.equal(next.brokerExecutions.length,3);assert.equal(m.batches[0].created,3);assert.equal(m.batches[0].filename,'對帳單.csv');
+ assert.equal(next.auditLogs.at(-1).action,'IMPORT');assert.equal(next.appTransactions.length,raw.appTransactions.length,'CSV never creates trades');
+ const status=d=>Object.fromEntries(projectLedger(d,who,pid).reconciliation.map(l=>[l.tradeDate+'/'+l.matchStatus,1]));
+ assert.ok(status(next)['2026-09-25/MISSING_IN_APP']);assert.ok(status(next)['2026-09-30/FEE_TAX_DIFF']);
+ const again=buildOperation(next,who,pid,{kind:'importFile',account:'review-a',text:CSV,filename:'again.csv'});
+ assert.equal(again.brokerExecutions.length,3);assert.equal(projectLedger(again,who,pid).batches[0].duplicate,3);
+ // Bulk accept, then deleting the batch also clears those acceptances (A clearAcceptedBrokerDiffsForDeletedData).
+ const keys=projectLedger(next,who,pid).reconciliation.filter(l=>['FEE_TAX_DIFF','AMOUNT_DIFF'].includes(l.matchStatus)&&!l.settled).map(l=>l.key);
+ assert.ok(keys.length);const accepted=buildOperation(next,who,pid,{kind:'acceptReconciliation',keys});
+ assert.equal(Object.keys(accepted.acceptedBrokerDiffs).length,keys.length);
+ const removed=buildOperation(accepted,who,pid,{kind:'deleteImportBatch',id:next.importBatches.at(-1).id});
+ assert.equal(removed.brokerExecutions.length,0);assert.equal(removed.rawImportRows.length,0);assert.deepEqual(removed.acceptedBrokerDiffs,{});
+ assert.equal(removed.appTransactions.length,raw.appTransactions.length);
+});
+test('JSON ledger import creates trades; deleting the batch removes them',()=>{
+ const raw=fixture(),json=JSON.stringify([{id:'j-1',date:'2026-09-20',type:'BUY',symbol:'0050',price:90,shares:10,fee:1,tax:0}]);
+ const next=buildOperation(raw,who,pid,{kind:'importFile',account:'review-a',sourceType:'JSON_LEDGER',text:json,filename:'ledger.json'});
+ const tx=next.appTransactions.at(-1);assert.equal(tx.sourceType,'JSON_IMPORT');assert.equal(tx.sourceTransactionId,'j-1');
+ assert.equal(projectLedger(buildOperation(next,who,pid,{kind:'importFile',account:'review-a',sourceType:'JSON_LEDGER',text:json,filename:'ledger.json'}),who,pid).batches[0].duplicate,1);
+ const removed=buildOperation(next,who,pid,{kind:'deleteImportBatch',id:next.importBatches.at(-1).id});
+ assert.equal(removed.appTransactions.some(t=>t.id===tx.id),false);
+});
+test('Import templates can be added and removed; the default stays',()=>{
+ const raw=fixture();
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'createTemplate',fields:{name:'自訂',brokerId:'broker-fubon',mapping:'{bad'}}),/JSON/);
+ const next=buildOperation(raw,who,pid,{kind:'createTemplate',fields:{name:'富邦 CSV',brokerId:'broker-fubon',mapping:'{"tradeDate":"成交日"}'}});
+ const t=projectLedger(next,who,pid).templates.find(x=>x.name==='富邦 CSV');assert.equal(t.mapping.tradeDate,'成交日');
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'deleteTemplate',id:'tpl-cathay-default'}),/不能刪除/);
+ assert.equal(projectLedger(buildOperation(next,who,pid,{kind:'deleteTemplate',id:t.id}),who,pid).templates.some(x=>x.id===t.id),false);
+});
