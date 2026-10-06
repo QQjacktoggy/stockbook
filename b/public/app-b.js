@@ -181,7 +181,7 @@ async function click(b){
  if(b.dataset.portfolio){setState(client.select(b.dataset.portfolio));closeSheet(false);inventoryTab='held';return render();}
  if(b.dataset.trade)return tradeDetail(b.dataset.trade);
  if(b.dataset.new)return form(b.dataset.new,b.dataset.code||'');
- if(b.dataset.formType)return form(b.dataset.formType,'','',formSnapshot($('#trade-form')));
+ if(b.dataset.formType)return form(b.dataset.formType,'','',{...formSnapshot($('#trade-form')),fee:'',tax:''});
  if(b.dataset.period){period=b.dataset.period;return render();}
  if(b.dataset.type){tradeType=b.dataset.type;return renderTradeResults();}
  if(b.dataset.reconTab){reconTab=b.dataset.reconTab;return render();}
