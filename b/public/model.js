@@ -125,13 +125,17 @@ export function missingBenchmarks(raw,identity,portfolioId,account='all'){
  return data.appTransactions.filter(t=>t.portfolioId===pid&&['DEPOSIT','WITHDRAW'].includes(t.transactionType)&&(account==='all'||t.brokerAccountId===account)&&!(num(t.benchmarkPrice)>0)).map(t=>({id:t.id,date:t.tradeDate}));
 }
 export function contentCount(data){return mobileContentCount(data);}
-// The same broker fill imported twice (e.g. one CSV loaded again after the import checksum format changed): same account, day, side,
-// stock, order number, execution number, shares, price and net amount, but from a different import batch (two equal fills in one file can be real).
-// The earliest copy is kept; fills without an order number are never flagged.
+// The same broker fill imported twice (e.g. one CSV loaded again after the import checksum format changed, or a later export that
+// splits one order's fee and tax differently across its fills, so the net differs by NT$1): same account, day, side, stock, order number,
+// execution number, shares and price, from different import batches. Fee, tax and net are left out on purpose. Equal fills inside one
+// batch can be real (one order filled twice), so a later batch only repeats as many copies as an earlier batch already holds.
+// The earliest copies are kept; fills without an order number are never flagged.
+const fillSig=x=>[x.brokerAccountId,x.tradeDate,x.side,x.securityId,String(x.orderNo||'').trim(),String(x.executionNo||'').trim(),num(x.shares),num(x.price)].join('|');
 function duplicateExecutions(data,pid){
- const seen=new Map(),extras=new Map();
+ const groups=new Map(),extras=new Map();
  const rows=data.brokerExecutions.filter(x=>x.portfolioId===pid&&String(x.orderNo||'').trim()).sort((a,b)=>String(a.createdAt||'').localeCompare(String(b.createdAt||''))||String(a.id).localeCompare(String(b.id)));
- for(const x of rows){const sig=[x.brokerAccountId,x.tradeDate,x.side,x.securityId,String(x.orderNo).trim(),String(x.executionNo||'').trim(),num(x.shares),num(x.price),num(x.netAmount)].join('|');const first=seen.get(sig);if(!first)seen.set(sig,x);else if(String(first.importBatchId||'')!==String(x.importBatchId||''))extras.set(x.id,first.id);}
+ for(const x of rows){const g=groups.get(fillSig(x))||new Map();g.set(String(x.importBatchId||''),[...(g.get(String(x.importBatchId||''))||[]),x]);groups.set(fillSig(x),g);}
+ for(const g of groups.values()){let kept=[];for(const copies of g.values()){copies.forEach((x,i)=>{if(i<kept.length)extras.set(x.id,kept[i].id);});if(copies.length>kept.length)kept=[...kept,...copies.slice(kept.length)];}}
  return extras;
 }
 export function buildOperation(raw,identity,portfolioId,op){
@@ -301,6 +305,9 @@ export function buildOperation(raw,identity,portfolioId,op){
    const have=new Set((next[key]||[]).map(x=>x.id));next[key]=[...(next[key]||[]),...imported[key].filter(x=>!have.has(x.id))];
   }
   const batch=imported.importBatches.at(-1);
+  // A's checksum includes fee and tax, so an export that splits one order's fees differently slips through; drop those repeats here.
+  const repeats=[...duplicateExecutions({brokerExecutions:[...data.brokerExecutions.filter(x=>x.importBatchId!==batch.id),...imported.brokerExecutions.filter(x=>x.importBatchId===batch.id)]},pid).keys()].filter(id=>imported.brokerExecutions.some(x=>x.id===id&&x.importBatchId===batch.id));
+  if(repeats.length){const drop=new Set(repeats);next.brokerExecutions=next.brokerExecutions.filter(x=>!drop.has(x.id));next.importBatches=next.importBatches.map(b=>b.id===batch.id?{...b,createdCount:Math.max(0,num(b.createdCount)-drop.size),duplicateCount:num(b.duplicateCount)+drop.size}:b);Object.assign(batch,{createdCount:Math.max(0,num(batch.createdCount)-drop.size),duplicateCount:num(batch.duplicateCount)+drop.size});}
   action='IMPORT';entityType='import_batch';entityId=batch.id;after={sourceType:batch.sourceType,sourceFilename:batch.sourceFilename,rowCount:batch.rowCount,createdCount:batch.createdCount,duplicateCount:batch.duplicateCount};
  }else if(op.kind==='deleteImportBatch'){
   // Same scope as A's handleDeleteImportBatch: a CSV batch removes its broker records; a JSON batch also removes the trades it created.

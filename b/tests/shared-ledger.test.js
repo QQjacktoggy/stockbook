@@ -560,3 +560,25 @@ test('Reconciliation rows carry both sides\' shares and fills for the review she
  assert.deepEqual(l.brokerRows.map(r=>r.orderNo),['K1','K2']);assert.deepEqual(l.appRows.map(r=>r.id),['demo-buy-a']);
  assert.deepEqual(l.duplicates,[]);
 });
+test('One order filled twice: a later export with fees split differently is caught at import and flagged if already stored',()=>{
+ const head='﻿證券對帳單\n股名,日期,成交股數,淨收付金額,買賣別,成交價,成本,手續費,交易稅,委託書號\n';
+ const first=head+'元大台灣50,2026/09/29,"379","38,320",現賣,"101.25","38,373","15","38",k00Wt\n元大台灣50,2026/09/29,"121","12,240",現賣,"101.3","12,257","5","12",k00Wt\n';
+ const later=head+'元大台灣50,2026/09/29,"379","38,321",現賣,"101.25","38,373","15","37",k00Wt\n元大台灣50,2026/09/29,"121","12,239",現賣,"101.3","12,257","5","13",k00Wt\n';
+ const raw=fixture(),one=buildOperation(raw,who,pid,{kind:'importFile',account:'review-a',text:first,filename:'a.csv'});
+ const sells=x=>x.brokerExecutions.filter(e=>e.orderNo==='k00Wt');
+ assert.equal(sells(one).length,2,'two real fills of one order in one file are both kept');
+ assert.deepEqual(projectLedger(one,who,pid).reconciliation.flatMap(l=>l.duplicates),[]);
+ const two=buildOperation(one,who,pid,{kind:'importFile',account:'review-a',text:later,filename:'b.csv'});
+ assert.equal(sells(two).length,2,'the re-split export adds no copies');
+ const b2=projectLedger(two,who,pid).batches.find(b=>b.filename==='b.csv');assert.equal(b2.created,0);assert.equal(b2.duplicate,2);
+ // Copies stored before this check (as in A's ledger) are flagged and removable, keeping the first export.
+ const legacy=structuredClone(one),later2=buildOperation(fixture(),who,pid,{kind:'importFile',account:'review-a',text:later,filename:'b.csv'});
+ legacy.importBatches.push(...later2.importBatches.filter(b=>b.sourceFilename==='b.csv'));legacy.brokerExecutions.push(...sells(later2).map(e=>({...e,createdAt:'2099-01-01T00:00:00Z'})));
+ const m=projectLedger(legacy,who,pid),ids=m.reconciliation.flatMap(l=>l.duplicates.map(d=>d.id));
+ assert.equal(ids.length,2);
+ const fixed=buildOperation(legacy,who,pid,{kind:'removeDuplicateExecutions',ids});
+ assert.deepEqual(sells(fixed).map(e=>e.netAmount).sort(),sells(one).map(e=>e.netAmount).sort());
+ // A later batch holding more equal fills than an earlier one keeps the extra one.
+ const more=structuredClone(legacy);more.brokerExecutions.push({...sells(later2)[1],id:'third',createdAt:'2099-01-01T00:00:01Z'});
+ assert.equal(projectLedger(more,who,pid).reconciliation.flatMap(l=>l.duplicates).length,2);
+});
