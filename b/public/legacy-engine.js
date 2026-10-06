@@ -1336,3 +1336,5 @@ export function mobileBasis(data,lot) {state=data;return remainingCostBasis(lot)
 export function mobileSellOptions(data,account,symbol,date,excludedId='') {state=data;return quickSellLotOptions(account,symbol,date,excludedId);}
 export function mobileCosts(data,type,price,shares,brokerId,security) {state=data;return estimateTradeCosts(type,price,shares,brokerId,security);}
 export function acceptanceKey(link) {return brokerDiffAcceptanceKey(link);}
+export function mobileNormalizeTransaction(tx) {return normalizeTransaction(tx);}
+export function mobileSettings(data,portfolioId) {state=data;return getPortfolioSettings(portfolioId);}

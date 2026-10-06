@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {projectLedger,buildOperation,sellOptions,taipeiToday,minimalLots,CATEGORIES} from '../public/model.js';
+import {fetchQuote,benchmarkFor,yahooSymbolFor} from '../public/quotes.js';
 import {createLedgerClient,namespaceFor,compressLedger,decodeLedger} from '../public/cloud-client.js';
 const original=JSON.parse(readFileSync(new URL('./fixture.json',import.meta.url)));
 const who={uid:'fake-uid',email:'review@example.test',emailVerified:true,displayName:'測試'};
@@ -26,7 +27,7 @@ const head='stockLedgers/'+namespaceFor(who.email);
 test('Taipei day does not use UTC day',()=>assert.equal(taipeiToday(new Date('2026-09-30T17:00:00Z')),'2026-10-01'));
 test('Projects legacy account cash, linked lots and unknown execution time',()=>{
  const raw=fixture(),before=JSON.stringify(raw),model=projectLedger(raw,who,pid);
- assert.equal(model.portfolioId,pid);assert.equal(model.trades.length,4);
+ assert.equal(model.portfolioId,pid);assert.equal(model.trades.length,5);assert.equal(model.trades.filter(t=>t.cash).length,1);
  assert.ok(model.cash['review-a']>0);assert.ok(model.lots.some(l=>l.account==='review-a'));
  assert.equal(model.trades.find(t=>t.id==='demo-buy-a').time,'');
  assert.equal(JSON.stringify(raw),before,'Read projection must not mutate raw cloud payload');
@@ -54,7 +55,8 @@ test('Rejects invalid calendar date, future date, money and foreign account',()=
 test('Protects referenced buys while permitting metadata edits',()=>{
  const raw=fixture(),old=raw.appTransactions.find(t=>t.id==='demo-buy-a');
  assert.throws(()=>buildOperation(raw,who,pid,{kind:'deleteTransaction',id:old.id}),/引用/);
- assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertTransaction',id:old.id,fields:fields({qty:old.shares-1,price:old.price,fee:old.fee,date:old.tradeDate})}),/引用/);
+ // Shrinking the buy below what the linked sell already used would leave that sell unmatched.
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertTransaction',id:old.id,fields:fields({qty:99,price:old.price,fee:old.fee,date:old.tradeDate})}),/配不到/);
  const next=buildOperation(raw,who,pid,{kind:'upsertTransaction',id:old.id,fields:fields({qty:old.shares,price:old.price,fee:old.fee,date:old.tradeDate,note:'只改備註'})});
  assert.equal(next.appTransactions.find(t=>t.id===old.id).note,'只改備註');
 });
@@ -145,4 +147,97 @@ test('Editing a trade saves the chosen category, including CORE',()=>{
  assert.ok(CATEGORIES.includes('CORE'));
  assert.equal(edit('CORE'),'CORE');assert.equal(edit('TRADING'),'TRADING');
  assert.equal(edit('NOT_A_CATEGORY'),raw.appTransactions.find(t=>t.id===old.id).strategyCategory||'LONG_TERM');
+});
+
+// --- First-batch features: cash entries, quotes, editing matched trades, rebuy actions ---
+function cash(overrides={}){return {cashType:'DEPOSIT',account:'review-a',date:taipeiToday(),amount:5000,note:'B 入金',...overrides};}
+const cashOf=(raw,acc='review-a')=>projectLedger(raw,who,pid).cash[acc];
+test('Deposit, dividend and withdrawal follow A cash rules and keep the benchmark price',()=>{
+ const raw=fixture(),base=cashOf(raw);
+ const bench={benchmarkSecurityId:'sec-0050',benchmarkSymbol:'0050',benchmarkPrice:101.234,benchmarkPriceSource:'YAHOO_FINANCE',benchmarkPriceDate:taipeiToday(),benchmarkPriceCapturedAt:new Date().toISOString()};
+ let next=buildOperation(raw,who,pid,{kind:'upsertCash',fields:cash(),benchmark:bench});
+ const dep=next.appTransactions.at(-1);
+ assert.equal(dep.transactionType,'DEPOSIT');assert.equal(dep.price,5000);assert.equal(dep.shares,0);assert.equal(dep.netAmount,5000);assert.equal(dep.strategyCategory,'CORE');assert.equal(dep.securityId,'sec-0050');
+ assert.equal(dep.benchmarkPrice,101.23);assert.equal(dep.benchmarkSymbol,'0050');
+ assert.equal(cashOf(next),base+5000);
+ next=buildOperation(next,who,pid,{kind:'upsertCash',fields:cash({cashType:'DIVIDEND',amount:321})});
+ const div=next.appTransactions.at(-1);assert.equal(div.strategyCategory,'DIVIDEND');assert.equal(div.benchmarkPrice,undefined);
+ assert.equal(cashOf(next),base+5321);
+ next=buildOperation(next,who,pid,{kind:'upsertCash',fields:cash({cashType:'WITHDRAW',amount:1000})});
+ assert.equal(next.appTransactions.at(-1).netAmount,-1000);assert.equal(cashOf(next),base+4321);
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'upsertCash',fields:cash({cashType:'WITHDRAW',amount:base+10000})}),/現金不足/);
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'upsertCash',fields:cash({amount:0})}),/大於 0/);
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'upsertCash',fields:cash({cashType:'BUY'})}),/入金、出金/);
+ const model=projectLedger(next,who,pid);
+ assert.deepEqual(model.trades.filter(t=>t.cash).map(t=>t.type).sort(),['deposit','deposit','dividend','withdraw']);
+});
+test('Cash entries can be edited (same type) and deleted; benchmark is cleared when the date moves',()=>{
+ const raw=fixture(),bench={benchmarkSecurityId:'sec-0050',benchmarkSymbol:'0050',benchmarkPrice:100,benchmarkPriceSource:'X',benchmarkPriceDate:taipeiToday(),benchmarkPriceCapturedAt:'t'};
+ let next=buildOperation(raw,who,pid,{kind:'upsertCash',fields:cash(),benchmark:bench});const id=next.appTransactions.at(-1).id;
+ next=buildOperation(next,who,pid,{kind:'upsertCash',id,fields:cash({amount:7000,note:'改金額'})});
+ let tx=next.appTransactions.find(t=>t.id===id);assert.equal(tx.price,7000);assert.equal(tx.benchmarkPrice,100,'same date keeps benchmark');
+ next=buildOperation(next,who,pid,{kind:'upsertCash',id,fields:cash({amount:7000,date:'2026-09-29'})});
+ tx=next.appTransactions.find(t=>t.id===id);assert.equal(tx.benchmarkPrice,'','moved date drops stale benchmark so A can backfill');
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'upsertCash',id,fields:cash({cashType:'WITHDRAW'})}),/類型/);
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'upsertCash',id:'demo-buy-a',fields:cash()}),/不是現金/);
+ const before=cashOf(next);next=buildOperation(next,who,pid,{kind:'deleteTransaction',id});
+ assert.equal(cashOf(next),before-7000);assert.equal(next.appTransactions.some(t=>t.id===id),false);
+});
+test('Quotes are stored with the same id and fields as A and replace older quotes',()=>{
+ const raw=fixture();raw.marketQuotes=[{id:'quote-review-p-sec-0050',portfolioId:pid,securityId:'sec-0050',price:110,quoteTime:'2026-10-01T02:00:00Z',createdAt:'c0'}];
+ const next=buildOperation(raw,who,pid,{kind:'updateQuotes',quotes:[{securityId:'sec-0050',price:123.456,source:'YAHOO_FINANCE',sourceDate:'2026-10-06',quoteTime:'2026-10-06T05:00:00Z',yahooSymbol:'0050.TW'}]});
+ assert.equal(next.marketQuotes.length,1);const q=next.marketQuotes[0];
+ assert.equal(q.id,'quote-review-p-sec-0050');assert.equal(q.price,123.46);assert.equal(q.createdAt,'c0');assert.equal(q.finmindStockId,'0050');assert.equal(q.yahooSymbol,'0050.TW');
+ assert.equal(projectLedger(next,who,pid).stocks['sec-0050'].price,123.46);
+ assert.equal(next.auditLogs.at(-1).entityType,'market_quote');
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'updateQuotes',quotes:[{securityId:'sec-0050',price:0}]}),/報價/);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'updateQuotes',quotes:[{securityId:'nope',price:10}]}),/報價/);
+});
+test('Quote fetch falls back like A: Yahoo, then TWSE, then FinMind',async()=>{
+ const stock={symbol:'0050',market:'TW'};assert.equal(yahooSymbolFor(stock),'0050.TW');assert.equal(yahooSymbolFor({symbol:'6488',market:'TWO'}),'6488.TWO');
+ const seen=[];
+ const fetcher=async url=>{seen.push(url);if(url.includes('yahoo'))return {ok:false,status:403,text:async()=>''};if(url.includes('twse'))return {ok:true,text:async()=>JSON.stringify({msgArray:[{z:'-',y:'191.5',d:'20261006'}]})};throw new Error('unexpected');};
+ const q=await fetchQuote(stock,fetcher);
+ assert.equal(q.price,191.5);assert.equal(q.source,'TWSE_SNAPSHOT');assert.equal(q.sourceDate,'2026-10-06');
+ assert.ok(seen.some(u=>u.includes('r.jina.ai'))&&seen.some(u=>u.includes('allorigins')),'Yahoo proxies tried before TWSE');
+ const none=await benchmarkFor(stock,'sec-0050',taipeiToday(),{fetcher:async()=>{throw new Error('offline');},timeoutMs:200});
+ assert.equal(none,null,'benchmark is best effort');
+});
+test('Matched trades: amounts can change and matching is recomputed',()=>{
+ const raw=fixture(),buy=raw.appTransactions.find(t=>t.id==='demo-buy-a');
+ const sellPnl=d=>projectLedger(d,who,pid).raw.sellMatches.filter(m=>m.sellTransactionId==='demo-sell-am').reduce((s,m)=>s+Number(m.netProfit||0),0);
+ const before=sellPnl(raw);
+ const next=buildOperation(raw,who,pid,{kind:'upsertTransaction',id:buy.id,fields:fields({qty:buy.shares,price:90,fee:buy.fee,tax:buy.tax,date:buy.tradeDate,time:''})});
+ assert.equal(next.appTransactions.find(t=>t.id===buy.id).price,90);
+ assert.ok(sellPnl(next)>before,'cheaper buy raises the realized gain on the matched sell');
+ // A linked sell can also change size; inventory for it is re-checked.
+ const sell=raw.appTransactions.find(t=>t.id==='demo-sell-am');
+ const bigger=buildOperation(raw,who,pid,{kind:'upsertTransaction',id:sell.id,fields:fields({type:'sell',qty:150,price:sell.price,fee:sell.fee,tax:sell.tax,date:sell.tradeDate,time:'',sources:sell.linkedBuyTransactionId})});
+ assert.equal(bigger.appTransactions.find(t=>t.id===sell.id).shares,150);
+});
+test('Borrow trades only allow price and cost edits in B',()=>{
+ const raw=fixture(),buy=raw.appTransactions.find(t=>t.id==='demo-buy-pm');buy.borrowRebuyType='REBUY_FILL';buy.rebuyCycleId='cycle-x';
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertTransaction',id:buy.id,fields:fields({qty:50,price:buy.price,fee:buy.fee,date:buy.tradeDate})}),/借券/);
+ const next=buildOperation(raw,who,pid,{kind:'upsertTransaction',id:buy.id,fields:fields({qty:buy.shares,price:104,fee:buy.fee,tax:buy.tax,date:buy.tradeDate})});
+ const t=next.appTransactions.find(x=>x.id===buy.id);assert.equal(t.price,104);assert.equal(t.borrowRebuyType,'REBUY_FILL');assert.equal(t.rebuyCycleId,'cycle-x');
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'deleteTransaction',id:buy.id}),/借券/);
+});
+test('Rebuy: a B buy fills the plan like A, and plans can be closed manually',()=>{
+ const raw=fixture(),task=projectLedger(raw,who,pid).rebuy.find(r=>r.id==='demo-sell-am');
+ assert.ok(task,'fixture has an open rebuy plan');
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({rebuyIds:task.id,date:'2026-09-29'})}),/早於/);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({rebuyIds:task.id,account:'review-b'})}),/相同/);
+ assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({rebuyIds:'nope'})}),/不存在/);
+ const next=buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({rebuyIds:task.id,qty:task.qty,price:task.target})});
+ const tx=next.appTransactions.at(-1);
+ assert.equal(tx.buyIntent,'REBUY');assert.equal(tx.rebuySellTransactionIds,task.id);assert.equal(tx.strategyCategory,'REBUY');
+ assert.equal(projectLedger(next,who,pid).rebuy.some(r=>r.id===task.id),false,'filled plan leaves the open list');
+ const t=projectLedger(next,who,pid).trades.find(x=>x.id===tx.id);assert.equal(t.linked,true);assert.equal(t.refd,false);
+ const removed=buildOperation(next,who,pid,{kind:'deleteTransaction',id:tx.id});
+ assert.ok(projectLedger(removed,who,pid).rebuy.some(r=>r.id===task.id),'deleting the rebuy buy reopens the plan');
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'deleteTransaction',id:task.id}),/引用/,'sell with a rebuy cannot be deleted');
+ const closed=buildOperation(raw,who,pid,{kind:'closeRebuy',sellIds:[task.id]});
+ assert.deepEqual(closed.manualClosedRebuySellIds,[task.id]);assert.equal(projectLedger(closed,who,pid).rebuy.length,0);
+ assert.equal(closed.auditLogs.at(-1).action,'MANUAL_CLOSE');
+ assert.throws(()=>buildOperation(closed,who,pid,{kind:'closeRebuy',sellIds:[task.id]}),/已改變/);
 });
