@@ -173,6 +173,25 @@ test('Deposit, dividend and withdrawal follow A cash rules and keep the benchmar
  const model=projectLedger(next,who,pid);
  assert.deepEqual(model.trades.filter(t=>t.cash).map(t=>t.type).sort(),['deposit','deposit','dividend','withdraw']);
 });
+test('Balance calibration records the gap as one marked deposit or withdrawal and can be deleted',()=>{
+ const raw=fixture(),before=JSON.stringify(raw),cashA=d=>projectLedger(d,who,pid).cash['review-a'],base=cashA(raw);
+ const bench={benchmarkSecurityId:'sec-0050',benchmarkSymbol:'0050',benchmarkPrice:100,benchmarkPriceSource:'X',benchmarkPriceDate:taipeiToday(),benchmarkPriceCapturedAt:'t'};
+ let next=buildOperation(raw,who,pid,{kind:'calibrateCash',fields:{account:'review-a',actual:String(base-38)},benchmark:bench});
+ assert.equal(JSON.stringify(raw),before,'raw ledger is not mutated');
+ const w=next.appTransactions.at(-1);
+ assert.equal(w.transactionType,'WITHDRAW');assert.equal(w.price,38);assert.equal(w.tradeDate,taipeiToday());assert.equal(w.benchmarkPrice,100);
+ assert.deepEqual(w.cashCalibration,{actualBalance:base-38,ledgerBalance:base,difference:-38});assert.match(w.note,/餘額校準/);
+ assert.equal(cashA(next),base-38);assert.equal(next.auditLogs.at(-1).action,'CALIBRATE_CASH');
+ assert.equal(next.appTransactions.length,raw.appTransactions.length+1,'existing trades untouched');
+ assert.equal(projectLedger(next,who,pid).trades.find(t=>t.id===w.id).calibration,true);
+ next=buildOperation(next,who,pid,{kind:'calibrateCash',fields:{account:'review-a',actual:(base+12).toLocaleString('en-US')}});
+ assert.equal(next.appTransactions.at(-1).transactionType,'DEPOSIT');assert.equal(next.appTransactions.at(-1).price,50);assert.equal(cashA(next),base+12);
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'calibrateCash',fields:{account:'review-a',actual:String(base+12.4)}}),/一致/);
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'calibrateCash',fields:{account:'review-a',actual:''}}),/實際現金餘額/);
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'calibrateCash',fields:{account:'review-a',actual:'-5'}}),/實際現金餘額/);
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'calibrateCash',fields:{account:'nope',actual:'100'}}),/券商帳戶/);
+ next=buildOperation(next,who,pid,{kind:'deleteTransaction',id:w.id});assert.equal(cashA(next),base+50);
+});
 test('Cash entries can be edited (same type) and deleted; benchmark is cleared when the date moves',()=>{
  const raw=fixture(),bench={benchmarkSecurityId:'sec-0050',benchmarkSymbol:'0050',benchmarkPrice:100,benchmarkPriceSource:'X',benchmarkPriceDate:taipeiToday(),benchmarkPriceCapturedAt:'t'};
  let next=buildOperation(raw,who,pid,{kind:'upsertCash',fields:cash(),benchmark:bench});const id=next.appTransactions.at(-1).id;

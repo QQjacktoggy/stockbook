@@ -43,7 +43,7 @@ function totals(){let cash=Object.entries(state.cash).filter(([k])=>state.accoun
 function recent(){return selected(state.trades).slice().sort((a,b)=>b.date.localeCompare(a.date)||(b.time||'00:00').localeCompare(a.time||'00:00')||b.recorded.localeCompare(a.recorded));}
 const CASH_NAMES={deposit:'入金',withdraw:'出金',dividend:'股息',interest:'利息'},CASH_ICONS={deposit:'入',withdraw:'出',dividend:'息',interest:'利'};
 function typeName(t){return CASH_NAMES[t.type]||(t.type==='buy'?'買進':'賣出');}
-function tradeRow(t,fullDate){if(t.cash){const when=[fullDate?short(t.date):'',accountName(t.account)].filter(Boolean).join(' · ');return '<button class="trade-row" data-trade="'+esc(t.id)+'"><span class="trade-icon cash">'+CASH_ICONS[t.type]+'</span><span class="trade-main"><strong>'+CASH_NAMES[t.type]+'</strong><small>'+esc(when)+(t.note?' · '+esc(t.note):'')+'</small></span><span class="trade-end"><b>'+(t.net<0?'−':'+')+fmt(Math.abs(t.net))+'</b><small>現金</small></span></button>';}const when=[fullDate?short(t.date):'',t.time||(fullDate?'':'時間未填')].filter(Boolean).join(' ');return '<button class="trade-row" data-trade="'+esc(t.id)+'"><span class="trade-icon '+t.type+'">'+(t.type==='buy'?'買':'賣')+'</span><span class="trade-main"><strong>'+esc(stockName(t.code))+'<span class="code">'+esc(ticker(t.code))+'</span></strong><small>'+(t.borrow?(t.borrow==='BORROW_SELL'?'借券賣出 · ':'借券回補 · '):'')+esc(when)+' · '+esc(accountName(t.account))+'</small></span><span class="trade-end"><b>'+fmt(Math.abs(t.net))+'</b><small>'+fmt(t.qty)+' 股 × '+fmt(t.price)+'</small></span></button>';}
+function tradeRow(t,fullDate){if(t.cash){const when=[fullDate?short(t.date):'',accountName(t.account)].filter(Boolean).join(' · ');return '<button class="trade-row" data-trade="'+esc(t.id)+'"><span class="trade-icon cash">'+CASH_ICONS[t.type]+'</span><span class="trade-main"><strong>'+(t.calibration?'餘額校準（'+CASH_NAMES[t.type]+'）':CASH_NAMES[t.type])+'</strong><small>'+esc(when)+(t.note?' · '+esc(t.note):'')+'</small></span><span class="trade-end"><b>'+(t.net<0?'−':'+')+fmt(Math.abs(t.net))+'</b><small>現金</small></span></button>';}const when=[fullDate?short(t.date):'',t.time||(fullDate?'':'時間未填')].filter(Boolean).join(' ');return '<button class="trade-row" data-trade="'+esc(t.id)+'"><span class="trade-icon '+t.type+'">'+(t.type==='buy'?'買':'賣')+'</span><span class="trade-main"><strong>'+esc(stockName(t.code))+'<span class="code">'+esc(ticker(t.code))+'</span></strong><small>'+(t.borrow?(t.borrow==='BORROW_SELL'?'借券賣出 · ':'借券回補 · '):'')+esc(when)+' · '+esc(accountName(t.account))+'</small></span><span class="trade-end"><b>'+fmt(Math.abs(t.net))+'</b><small>'+fmt(t.qty)+' 股 × '+fmt(t.price)+'</small></span></button>';}
 function go(next){closeSheet(false);page=next;render();document.documentElement.scrollTop=0;document.body.scrollTop=0;requestAnimationFrame(()=>window.scrollTo({top:0,behavior:'instant'}));}
 function render(){ $('#brand-icon').innerHTML=icon('chart');$('#nav').hidden=!state;$('#account-switch').hidden=!state;if(!state){$('#nav').innerHTML='';$('#main').innerHTML=authView();return;}const scope=scopeLabel();$('#account-switch').innerHTML='<span>'+esc(scope)+'</span>'+icon('down');$('#account-switch').setAttribute('aria-label','切換帳本與帳戶，目前：'+scope);const tabs=[['home','首頁'],['trades','交易'],['inventory','庫存'],['reconcile','對帳'],['more','更多']],navPage=page==='reports'?'more':page;$('#nav').innerHTML=tabs.map(([id,name])=>'<button data-page="'+id+'" class="'+(id===navPage?'active':'')+'" '+(id===navPage?'aria-current="page"':'')+'>'+icon(id)+'<span>'+name+'</span></button>').join('');$('#main').innerHTML=({home,trades:tradePage,inventory:inventoryPage,reconcile:reconcilePage,more:morePage,reports:reportsPage}[page])();}
 function home(){const t=totals(),rows=recent().slice(0,3),pending=issues(),rebuy=buybacks(),lent=openCycles(),count=pending.length+rebuy.length+lent.length;
@@ -235,6 +235,32 @@ async function submitCash(f){if(!f.reportValidity())return;const b=f.querySelect
   if(['deposit','withdraw'].includes(d.cashType)&&(!old||old.date!==d.date||old.account!==d.account)&&state.defaultCode){b.textContent='正在查 0050 基準價…';benchmark=await benchmarkFor(stocks[state.defaultCode],state.defaultCode,d.date);b.textContent='正在儲存…';}
   const next=await client.commit({kind:'upsertCash',id:f.dataset.editId,fields:d,benchmark});
   if(client.user?.uid!==who)return;setState(next);if(f.isConnected)closeSheet(false);render();toast(CASH_NAMES[d.cashType]+'已儲存'+(benchmark||!['deposit','withdraw'].includes(d.cashType)||old?'':'（0050 基準價暫時查不到，A 版可之後補上）'));
+ }catch(e){const box=f.querySelector('#form-error');if(f.isConnected&&box){box.innerHTML='<div class="error">'+esc(errorText(e))+'</div>';box.scrollIntoView({block:'nearest'});}else toast(errorText(e));}
+ finally{if(b.isConnected){b.disabled=false;b.textContent=label;}}}
+// 餘額校準: type the broker's real cash balance; B records the gap as one deposit or withdrawal dated today.
+function calibrateForm(){
+ if(needAccounts())return;
+ const acc=state.account==='all'?accounts.find(a=>a.id!=='all').id:state.account;
+ sheet('校準餘額','<form id="calibrate-form"><div id="form-error" role="alert"></div><p class="hint">輸入券商帳戶目前的實際現金餘額，B 版會把差額記成今天的一筆「餘額校準」入金或出金，不改動任何既有交易。之後想撤銷，在交易紀錄刪掉這一筆即可。</p>'
+ +'<div class="form-field"><label for="k-account">券商帳戶</label><select id="k-account" name="account">'+accounts.filter(a=>a.id!=='all').map(a=>'<option value="'+esc(a.id)+'" '+(acc===a.id?'selected':'')+'>'+esc(a.full)+'</option>').join('')+'</select></div>'
+ +'<div class="form-field"><label for="k-actual">券商實際餘額</label><input id="k-actual" name="actual" type="number" inputmode="decimal" min="0" step="any" required></div>'
+ +'<dl class="definition" id="calibrate-preview"></dl>'
+ +'<div class="sticky-submit"><button class="primary wide" type="submit">校準</button></div></form>');
+ updateCalibratePreview();
+}
+function updateCalibratePreview(){
+ const f=$('#calibrate-form'),box=$('#calibrate-preview');if(!f||!box)return;
+ const ledger=Math.round((state.cash[f.elements.account.value]||0)*100)/100,raw=f.elements.actual.value,actual=Number(raw),diff=Math.round((actual-ledger)*100)/100;
+ const result=raw===''||!Number.isFinite(actual)?'—':Math.abs(diff)<1?'已一致，不需要校準':(diff>0?'記一筆入金 ':'記一筆出金 ')+money(Math.abs(diff));
+ box.innerHTML='<div><dt>帳本現金</dt><dd>'+money(ledger)+'</dd></div><div><dt>校準後</dt><dd>'+esc(result)+'</dd></div>';
+}
+async function submitCalibrate(f){if(!f.reportValidity())return;const b=f.querySelector('[type="submit"]'),label=b.textContent,who=client.user?.uid,d=Object.fromEntries(new FormData(f));b.disabled=true;f.querySelector('#form-error').innerHTML='';
+ try{
+  let benchmark=null;
+  if(state.defaultCode){b.textContent='正在查 0050 基準價…';benchmark=await benchmarkFor(stocks[state.defaultCode],state.defaultCode,today());}
+  b.textContent='正在儲存…';
+  const next=await client.commit({kind:'calibrateCash',fields:d,benchmark});
+  if(client.user?.uid!==who)return;setState(next);if(f.isConnected)closeSheet(false);render();toast('已校準，'+accountName(d.account)+' 現金 '+money(state.cash[d.account]||0));
  }catch(e){const box=f.querySelector('#form-error');if(f.isConnected&&box){box.innerHTML='<div class="error">'+esc(errorText(e))+'</div>';box.scrollIntoView({block:'nearest'});}else toast(errorText(e));}
  finally{if(b.isConnected){b.disabled=false;b.textContent=label;}}}
 let quotesBusy=false;
@@ -457,7 +483,8 @@ async function click(b){
  if(b.hasAttribute('data-drive-folder')){if(driveStatus?.folderId)window.open('https://drive.google.com/drive/folders/'+encodeURIComponent(driveStatus.folderId),'_blank','noopener');return;}
  if(b.hasAttribute('data-drive-disconnect'))return sheet('解除 Google Drive 連結','<p class="notice">解除後每日自動備份會停止，已經在 Drive 的備份檔不會刪除。</p><div class="sheet-actions"><button class="secondary" data-backups>取消</button><button class="danger" data-confirm-drive-disconnect>解除連結</button></div>');
  if(b.hasAttribute('data-confirm-drive-disconnect')){b.disabled=true;try{await client.driveDisconnect();driveStatus=null;backupSheet();toast('已解除 Google Drive 連結');}finally{if(b.isConnected)b.disabled=false;}return;}
- if(b.hasAttribute('data-cash'))return sheet('現金餘額','<dl class="definition">'+accounts.filter(a=>a.id!=='all').map(a=>'<div><dt>'+esc(a.full)+'</dt><dd>'+money(state.cash[a.id]||0)+'</dd></div>').join('')+'</dl><div class="cash-row"><button data-new-cash="deposit">入金</button><button data-new-cash="withdraw">出金</button><button data-new-cash="dividend">股息／利息</button></div>');
+ if(b.hasAttribute('data-cash'))return sheet('現金餘額','<dl class="definition">'+accounts.filter(a=>a.id!=='all').map(a=>'<div><dt>'+esc(a.full)+'</dt><dd>'+money(state.cash[a.id]||0)+'</dd></div>').join('')+'</dl><div class="cash-row"><button data-new-cash="deposit">入金</button><button data-new-cash="withdraw">出金</button><button data-new-cash="dividend">股息／利息</button></div><button class="secondary wide" style="margin-top:10px" data-calibrate>校準餘額（輸入券商實際餘額）</button>');
+ if(b.hasAttribute('data-calibrate'))return calibrateForm();
  if(b.hasAttribute('data-reload'))return reload();
  if(b.hasAttribute('data-backup'))return sheet('連線與儲存狀態','<dl class="definition"><div><dt>Google 帳號</dt><dd>'+esc(state.user.email)+'</dd></div><div><dt>雲端帳本</dt><dd>'+esc(client.namespace)+'</dd></div><div><dt>上次載入／儲存</dt><dd>'+esc(stamp(state.updatedAt))+'</dd></div><div><dt>資料寫入</dt><dd>A、B 共用正式資料</dd></div></dl><button class="primary wide" data-reload>重新載入最新資料</button>');
  if(b.hasAttribute('data-original'))return sheet('原本的完整功能','<p class="notice">A 版的功能都已經可以在 B 版使用。切換完成前 A 版仍可開啟；請不要同時在 A、B 修改。</p><a class="primary wide" style="display:block;text-align:center;text-decoration:none" href="https://jackstock-ed2d2.web.app" target="_blank" rel="noopener">開啟 A 版</a>');
@@ -511,8 +538,8 @@ document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b){
 function renderTradeResults(){const box=$('#trade-results');if(box)box.innerHTML=tradeResults();else render();}
 document.addEventListener('compositionstart',e=>{if(e.target.id==='trade-search')composing=true;});
 document.addEventListener('compositionend',e=>{if(e.target.id==='trade-search'){composing=false;query=e.target.value;renderTradeResults();}});
-document.addEventListener('input',e=>{if(e.target.id==='trade-search'){if(composing||e.isComposing)return;query=e.target.value;return renderTradeResults();}if(e.target.closest('#exchange-form'))return updateExchangePreview();if(e.target.closest('#trade-form'))updateEstimate(['f-date','f-account'].includes(e.target.id));});
-document.addEventListener('change',e=>{if(e.target.id==='c-account')updateCashHint();if(e.target.id==='restore-ok'){const r=$('[data-confirm-restore]');if(r)r.disabled=!e.target.checked;return;}if(e.target.id==='restore-file'&&e.target.files[0])return chooseRestore(e.target.files[0]).catch(error=>toast('無法還原：'+errorText(error)));if(e.target.id==='fe-broker')return feesSheet(e.target.value);
+document.addEventListener('input',e=>{if(e.target.id==='trade-search'){if(composing||e.isComposing)return;query=e.target.value;return renderTradeResults();}if(e.target.closest('#calibrate-form'))return updateCalibratePreview();if(e.target.closest('#exchange-form'))return updateExchangePreview();if(e.target.closest('#trade-form'))updateEstimate(['f-date','f-account'].includes(e.target.id));});
+document.addEventListener('change',e=>{if(e.target.id==='c-account')updateCashHint();if(e.target.id==='k-account')updateCalibratePreview();if(e.target.id==='restore-ok'){const r=$('[data-confirm-restore]');if(r)r.disabled=!e.target.checked;return;}if(e.target.id==='restore-file'&&e.target.files[0])return chooseRestore(e.target.files[0]).catch(error=>toast('無法還原：'+errorText(error)));if(e.target.id==='fe-broker')return feesSheet(e.target.value);
  const x=e.target.closest('#exchange-form');if(x){if(e.target.id==='x-source')return exchangeSheet(x.dataset.code,exchangeFields(x));return updateExchangePreview();}
  const f=e.target.closest('#trade-form');if(!f)return;
  if(e.target.id==='f-borrow')return form('sell','','',{...formSnapshot(f),borrow:e.target.checked?'sell':'',fee:'',tax:''});
@@ -521,7 +548,7 @@ document.addEventListener('change',e=>{if(e.target.id==='c-account')updateCashHi
  if(e.target.id==='f-stock'){const q=stocks[e.target.value]?.price;if(q!=null&&!f.dataset.editId)f.elements.price.value=q;f.dataset.lotsTouched=f.dataset.editId?'1':'';}
  if(['f-date','f-stock'].includes(e.target.id)&&!f.dataset.editId)f.dataset.lotsTouched='';
  updateEstimate(['f-date','f-stock','f-account'].includes(e.target.id));});
-document.addEventListener('submit',e=>{if(e.target.id==='email-login-form'){e.preventDefault();submitEmailLogin(e.target);}if(e.target.id==='native-password-form'){e.preventDefault();submitNativePassword(e.target);}if(e.target.id==='trade-form'){e.preventDefault();submitTrade(e.target);}if(e.target.id==='cash-form'){e.preventDefault();submitCash(e.target);}
+document.addEventListener('submit',e=>{if(e.target.id==='email-login-form'){e.preventDefault();submitEmailLogin(e.target);}if(e.target.id==='native-password-form'){e.preventDefault();submitNativePassword(e.target);}if(e.target.id==='trade-form'){e.preventDefault();submitTrade(e.target);}if(e.target.id==='cash-form'){e.preventDefault();submitCash(e.target);}if(e.target.id==='calibrate-form'){e.preventDefault();submitCalibrate(e.target);}
  if(e.target.id==='match-form'){e.preventDefault();const f=e.target;submitForm(f,{kind:'updateMatch',id:f.dataset.id,sources:Array.from(f.querySelectorAll('[name="source"]:checked')).map(x=>x.value).join(','),shares:f.elements.shares.value},()=>toast('配對已更新並重算'));}
  if(e.target.id==='exchange-form'){e.preventDefault();const f=e.target;submitForm(f,{kind:'createCostExchange',fields:exchangeFields(f)},()=>toast('成本交換已儲存'));}
  if(e.target.id==='import-form'){e.preventDefault();submitImport(e.target);}
