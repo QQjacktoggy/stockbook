@@ -387,6 +387,8 @@ test('First use: B creates a new ledger only where none exists',async()=>{
  await assert.rejects(c.createLedger({}),{code:'stockbook/exists'});assert.equal(JSON.stringify(docs.get(head)),saved,'a second create never overwrites');
  const denied=await createLedgerClient({projectId:'demo-p'}, {sdk:mockSdk(new Map(),user).sdk,fetcher:async()=>({ok:false,status:403,json:async()=>({error:{status:'PERMISSION_DENIED'}})})});
  await assert.rejects(denied.createLedger({}),{code:'stockbook/create-denied'});
+ const offline=await createLedgerClient({projectId:'demo-p'}, {sdk:mockSdk(new Map(),user).sdk,fetcher:async()=>{throw new TypeError('Failed to fetch');}});
+ await assert.rejects(offline.createLedger({}),{code:'unavailable',message:/連線失敗/});
 });
 const CSV='﻿證券對帳單\n股名,日期,成交股數,淨收付金額,買賣別,成交價,成本,手續費,交易稅,委託書號\n元大台灣50,2026/09/29,"300","-30,012",現買,"100","30,000","12","0",A1\n元大台灣50,2026/09/30,"100","-10,509",現買,"105","10,500","9","0",A2\n元大台灣50,2026/09/25,"50","-5,002",現買,"100","5,000","2","0",A3\n';
 test('CSV import like A: records broker rows, skips duplicates, feeds reconciliation, and batches can be deleted',()=>{
@@ -414,6 +416,10 @@ test('JSON ledger import creates trades; deleting the batch removes them',()=>{
  assert.equal(projectLedger(buildOperation(next,who,pid,{kind:'importFile',account:'review-a',sourceType:'JSON_LEDGER',text:json,filename:'ledger.json'}),who,pid).batches[0].duplicate,1);
  const removed=buildOperation(next,who,pid,{kind:'deleteImportBatch',id:next.importBatches.at(-1).id});
  assert.equal(removed.appTransactions.some(t=>t.id===tx.id),false);
+ // A batch whose deposit has already been spent can't be deleted, and the message says why.
+ const dep=buildOperation(raw,who,pid,{kind:'importFile',account:'review-a',sourceType:'JSON_LEDGER',text:JSON.stringify([{id:'j-dep',date:'2026-09-20',type:'DEPOSIT',price:500000,shares:0,fee:0,tax:0}]),filename:'cash.json'});
+ const spent=buildOperation(dep,who,pid,{kind:'upsertTransaction',fields:fields({qty:3000,price:100,fee:0})});
+ assert.throws(()=>buildOperation(spent,who,pid,{kind:'deleteImportBatch',id:dep.importBatches.at(-1).id}),/這批匯入的入出金已被之後的交易使用/);
 });
 test('Import templates can be added and removed; the default stays',()=>{
  const raw=fixture();

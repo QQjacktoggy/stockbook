@@ -60,7 +60,9 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
   const user=auth.currentUser,token=await user.getIdToken(),base='projects/'+config.projectId+'/databases/(default)/documents/';
   const value=v=>typeof v==='boolean'?{booleanValue:v}:Number.isInteger(v)?{integerValue:String(v)}:{stringValue:String(v)};
   const writes=docs.map(([path,data])=>({update:{name:base+path,fields:Object.fromEntries(Object.entries(data).map(([k,v])=>[k,value(v)]))},currentDocument:{exists:false}}));
-  const response=await fetcher('https://firestore.googleapis.com/v1/'+base.slice(0,-1)+':commit',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({writes})});
+  let response;
+  try{response=await fetcher('https://firestore.googleapis.com/v1/'+base.slice(0,-1)+':commit',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({writes})});}
+  catch(error){throw Object.assign(new Error('連線失敗，無法確認帳本是否已建立。請重新載入；若已建立就會直接開啟。'),{code:'unavailable',cause:error});}
   if(response.ok)return;
   const status=(await response.json().catch(()=>({})))?.error?.status||'';
   if(response.status===409||status==='ALREADY_EXISTS'||status==='FAILED_PRECONDITION')throw Object.assign(new Error('雲端已經有這個帳本，請重新載入，不會建立新帳本。'),{code:'stockbook/exists'});

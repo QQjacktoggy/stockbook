@@ -475,7 +475,7 @@ export function buildOperation(raw,identity,portfolioId,op){
  // No account may end with less than zero cash because of this change (an existing shortfall may stay, but not grow).
  if(op.kind!=='importFile')for(const a of data.brokerAccounts.filter(a=>a.portfolioId===pid)){
   const was=accountCash(data,pid,a.id),will=accountCash(candidate,pid,a.id);
-  if(will<-0.5&&will<was-0.5)throw new Error((a.accountName||a.name||'券商帳戶')+' 的現金會變成 '+Math.round(will).toLocaleString('zh-TW')+'。請先記錄入金，或調整這次修改。');
+  if(will<-0.5&&will<was-0.5)throw new Error((a.accountName||a.name||'券商帳戶')+' 的現金會變成 '+Math.round(will).toLocaleString('zh-TW')+(op.kind==='deleteImportBatch'?'，因為這批匯入的入出金已被之後的交易使用。請先刪除或調整那些交易，或先記錄入金。':'。請先記錄入金，或調整這次修改。'));
  }
  return next;
 }
