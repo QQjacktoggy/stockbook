@@ -551,3 +551,12 @@ test('Flags a broker fill imported twice, shows the ledger amount, and removes o
  // Missing-in-app rows have no ledger amount; missing-in-broker rows have no broker amount.
  const miss=m.reconciliation.find(l=>l.matchStatus==='MISSING_IN_BROKER');if(miss){assert.equal(miss.brokerNetAmount,null);assert.equal(miss.appNetAmount,miss.allocatedNetAmount);}
 });
+test('Reconciliation rows carry both sides\' shares and fills for the review sheet',()=>{
+ const raw=fixture();raw.importBatches=[...(raw.importBatches||[]),{id:'b1',portfolioId:pid,brokerAccountId:'review-a',sourceType:'BROKER_CSV',createdAt:'2026-09-29T08:00:00Z'}];
+ const ex=(id,orderNo)=>({id,userId:'review-user',portfolioId:pid,brokerId:'broker-yuanta',brokerAccountId:'review-a',securityId:'sec-0050',importBatchId:'b1',tradeDate:'2026-09-29',side:'BUY',shares:300,price:100,grossAmount:30000,fee:12,tax:0,netAmount:-30012,orderNo,createdAt:'2026-09-29T08:00:00Z'});
+ raw.brokerExecutions=[ex('e1','K1'),ex('e2','K2')];
+ const l=projectLedger(raw,who,pid).reconciliation.find(l=>l.tradeDate==='2026-09-29'&&l.side==='BUY');
+ assert.equal(l.matchStatus,'PARTIAL_MATCHED');assert.equal(l.appShares,300);assert.equal(l.brokerShares,600);
+ assert.deepEqual(l.brokerRows.map(r=>r.orderNo),['K1','K2']);assert.deepEqual(l.appRows.map(r=>r.id),['demo-buy-a']);
+ assert.deepEqual(l.duplicates,[]);
+});
