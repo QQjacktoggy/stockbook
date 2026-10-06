@@ -494,6 +494,7 @@ test('Drive import: folder links, keyword matching per account, and settings sav
  const files=[{id:'1',name:'Jack_對帳單_0930.csv',modifiedTime:'2026-09-30T10:00:00Z'},{id:'2',name:'jack_對帳單_1005.csv',modifiedTime:'2026-10-05T10:00:00Z'},{id:'3',name:'penny-1004.csv',modifiedTime:'2026-10-04T10:00:00Z'},{id:'4',name:'jack+penny 合併.csv',modifiedTime:'2026-10-06T10:00:00Z'}];
  const rows=latestByAccount(files,[{id:'a',keyword:'jack'},{id:'b',keyword:'Penny'},{id:'c',keyword:''},{id:'d',keyword:'mary'}]);
  assert.deepEqual(rows.map(r=>[r.account,r.file?.id||null]),[['a','2'],['b','3'],['d',null]],'newest per keyword; a name with two accounts\' keywords is skipped');
+ assert.equal(projectLedger(fixture(),who,pid).driveImport.folderId,'1bH_zM8xBiRe0wyhn28B2p7sOukziN1GQ','jack\'s folder is the default until one is saved');
  const raw=fixture(),next=buildOperation(raw,who,pid,{kind:'saveDriveImport',fields:{folderId:'1AbCdEfGhIjKlMnOp',folderName:'券商對帳單',keywords:{'review-a':'jack','review-b':'penny'}}});
  assert.deepEqual(projectLedger(next,who,pid).driveImport,{folderId:'1AbCdEfGhIjKlMnOp',folderName:'券商對帳單',keywords:{'review-a':'jack','review-b':'penny'}});
  assert.equal(next.auditLogs.at(-1).entityType,'drive_import_settings');

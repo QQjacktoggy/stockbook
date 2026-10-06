@@ -1,4 +1,6 @@
 // 對帳：從 Google Drive 指定資料夾找最新的券商 CSV。只讀取，不會修改 Drive 上的檔案。
+// jack's broker CSV folder (2026-10-06); used until a ledger saves its own folder in the Drive settings.
+export const DEFAULT_FOLDER_ID='1bH_zM8xBiRe0wyhn28B2p7sOukziN1GQ';
 export const DRIVE_SCOPE='https://www.googleapis.com/auth/drive.readonly';
 const API='https://www.googleapis.com/drive/v3/files';
 const SHEET='application/vnd.google-apps.spreadsheet';
