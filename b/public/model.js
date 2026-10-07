@@ -13,7 +13,8 @@ export function projectLedger(raw,identity,portfolioId='',account='all'){
  const cash={};accounts.filter(a=>a.id!=='all').forEach(a=>{cash[a.id]=scoped(data,pid,'cashLedger').filter(r=>r.brokerAccountId===a.id).reduce((s,r)=>s+num(r.amount),0);});
  const lots=mobileInventory(data).filter(l=>l.portfolioId===pid&&num(l.remainingShares)>0).map(l=>({id:l.id,source:l.sourceTransactionId||l.buyTransactionId,code:l.securityId,qty:num(l.remainingShares),cost:num(l.buyPrice),basis:mobileBasis(data,l),date:l.buyDate,account:l.brokerAccountId,borrowed:num(l.borrowedShares),buyTx:l.buyTransactionId,original:num(l.originalShares),exchangeable:mobileExchangeEligible(l),adjusted:num(l.manualCostAdjustment),quoteTime:stocks[l.securityId]?.quoteTime||''}));
  const cashKinds={DEPOSIT:'deposit',WITHDRAW:'withdraw',DIVIDEND:'dividend',INTEREST:'interest'};
- const trades=scoped(data,pid,'appTransactions').filter(t=>t.userId===user.id&&(['BUY','SELL'].includes(t.transactionType)||cashKinds[t.transactionType])).map(t=>{const amounts=mobileAmounts(data,t),cashKind=cashKinds[t.transactionType],refd=!cashKind&&referenced(raw,t,true);return {id:t.id,type:cashKind||(t.transactionType==='BUY'?'buy':'sell'),cash:!!cashKind,code:t.securityId,qty:num(t.shares),price:num(t.price),date:t.tradeDate,time:t.tradeTime||'',account:t.brokerAccountId,fee:num(t.fee),tax:num(t.tax),net:amounts.netAmount,note:t.note||'',calibration:!!t.cashCalibration,recorded:t.createdAt||'',borrow:t.borrowRebuyType||'',cycle:t.rebuyCycleId||'',borrowSources:t.sourceInventoryLotId||'',manual:num(t.manualMatchedShares),rebuyIds:t.rebuySellTransactionIds||'',linked:!cashKind&&(!!t.rebuySellTransactionIds||refd),refd,category:t.strategyCategory||'LONG_TERM',sources:t.linkedBuyTransactionId||'',aligned:amounts.isBrokerAligned,canEdit:true};});
+ const isReferenced=referenceIndex(raw,true);
+ const trades=scoped(data,pid,'appTransactions').filter(t=>t.userId===user.id&&(['BUY','SELL'].includes(t.transactionType)||cashKinds[t.transactionType])).map(t=>{const amounts=mobileAmounts(data,t),cashKind=cashKinds[t.transactionType],refd=!cashKind&&isReferenced(t.id);return {id:t.id,type:cashKind||(t.transactionType==='BUY'?'buy':'sell'),cash:!!cashKind,code:t.securityId,qty:num(t.shares),price:num(t.price),date:t.tradeDate,time:t.tradeTime||'',account:t.brokerAccountId,fee:num(t.fee),tax:num(t.tax),net:amounts.netAmount,note:t.note||'',calibration:!!t.cashCalibration,recorded:t.createdAt||'',borrow:t.borrowRebuyType||'',cycle:t.rebuyCycleId||'',borrowSources:t.sourceInventoryLotId||'',manual:num(t.manualMatchedShares),rebuyIds:t.rebuySellTransactionIds||'',linked:!cashKind&&(!!t.rebuySellTransactionIds||refd),refd,category:t.strategyCategory||'LONG_TERM',sources:t.linkedBuyTransactionId||'',aligned:amounts.isBrokerAligned,canEdit:true};});
  const rebuy=scoped(data,pid,'rebuyTasks').filter(t=>['OPEN','PARTIAL_FILLED'].includes(t.status)&&num(t.remainingRebuyShares)>0).map(t=>({id:t.sellTransactionId,code:t.securityId,account:t.brokerAccountId,date:t.sellDate,price:t.sellPrice,target:t.targetRebuyPrice,qty:t.remainingRebuyShares,sold:num(t.sellShares)}));
  const txById=new Map(data.appTransactions.map(t=>[t.id,t])),lotById=new Map(data.buyLots.map(l=>[l.id,l]));
  const cycles=(data.borrowRebuyCycles||[]).map(c=>{const s=txById.get(c.sellTradeId);return s&&s.portfolioId===pid?{id:c.id,code:s.securityId,account:s.brokerAccountId,date:c.sellDate,price:num(c.sellPrice),qty:num(c.sellQty),remaining:num(c.remainingRebuyQty),filled:num(c.totalRebuyQty),avg:num(c.avgRebuyPrice),profit:num(c.netProfit),status:c.status,sources:c.sourceInventoryLotId||'',fills:(c.rebuyMatches||[]).map(m=>({id:m.rebuyTradeId,date:m.rebuyDate,price:num(m.rebuyPrice),qty:num(m.rebuyQty),profit:num(m.netProfit)}))}:null;}).filter(Boolean);
@@ -93,11 +94,14 @@ function canWrite(data,user,pid){
  return p?.userId===user.id||data.portfolioMembers.some(m=>m.portfolioId===pid&&m.userId===user.id&&['OWNER','EDITOR'].includes(m.role));
 }
 // ignoreExchanges: A deletes a buy together with its cost exchanges, so deleting does not count them as references.
-function referenced(raw,tx,ignoreExchanges=false){
- const needle=tx.id;
- return (raw.appTransactions||[]).some(t=>t.id!==needle&&['linkedBuyTransactionId','sourceInventoryLotId','rebuySellTransactionIds','rebuyCycleId'].some(k=>String(t[k]||'').split(/[,\s]+/).includes(needle)))
- || (ignoreExchanges?['positionTransfers']:['positionTransfers','inventoryCostExchanges']).some(k=>(raw[k]||[]).some(x=>JSON.stringify(x).includes(needle)));
+// Built once per pass: checking every trade against every other trade made projecting a long ledger (and so every save) slow.
+function referenceIndex(raw,ignoreExchanges=false){
+ const ids=new Set();
+ for(const t of raw.appTransactions||[])for(const k of ['linkedBuyTransactionId','sourceInventoryLotId','rebuySellTransactionIds','rebuyCycleId'])for(const id of String(t[k]||'').split(/[,\s]+/))if(id!==t.id)ids.add(id);
+ const blobs=(ignoreExchanges?['positionTransfers']:['positionTransfers','inventoryCostExchanges']).flatMap(k=>(raw[k]||[]).map(x=>JSON.stringify(x)));
+ return needle=>ids.has(needle)||blobs.some(s=>s.includes(needle));
 }
+function referenced(raw,tx,ignoreExchanges=false){return referenceIndex(raw,ignoreExchanges)(tx.id);}
 function validateDate(date){
  if(!/^\d{4}-\d{2}-\d{2}$/.test(date))throw new Error('請填寫有效的成交日期。');
  const d=new Date(date+'T00:00:00Z');

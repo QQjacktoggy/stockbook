@@ -93,9 +93,10 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
    const updatedAt=new Date().toISOString(),bRevision=crypto.randomUUID();
    await firestoreModule.runTransaction(db,async tx=>{
     if(epoch!==ticket||auth.currentUser?.uid!==who.uid)throw new Error('登入狀態已改變，儲存已取消。');
-    const headRef=firestoreModule.doc(db,'stockLedgers',base.ns),head=await tx.get(headRef);
+    // Head and chunks are read together (one round trip instead of two); the checks are unchanged.
+    const headRef=firestoreModule.doc(db,'stockLedgers',base.ns),oldRefs=refs(base.ns,base.chunks.length);
+    const [head,...oldShots]=await Promise.all([headRef,...oldRefs].map(ref=>tx.get(ref)));
     if(!head.exists()||canonical(head.data())!==canonical(base.main))throw conflictError();
-    const oldRefs=refs(base.ns,base.chunks.length),oldShots=await Promise.all(oldRefs.map(ref=>tx.get(ref)));
     oldShots.forEach((shot,i)=>{if(!shot.exists()||canonical(shot.data())!==canonical(base.chunks[i]))throw conflictError();});
     if(epoch!==ticket||auth.currentUser?.uid!==who.uid)throw new Error('登入狀態已改變，儲存已取消。');
     const main={...base.main,namespace:base.ns,ownerUid:who.uid,ownerEmail:who.email,updatedAt,chunkCount:chunks.length,isCompressed:true,bRevision};
