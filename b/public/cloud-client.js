@@ -26,10 +26,12 @@ export function errorText(error){
  if(code.includes('network-request-failed')||code.includes('unavailable'))return '連線失敗，無法確認操作是否完成。請重新載入並檢查這筆交易後再操作。';
  return error?.message||'操作失敗，請重試。';
 }
-export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=null,fetcher=(...a)=>fetch(...a),onAuthChange=()=>{}}={}){
+export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=null,fetcher=(...a)=>fetch(...a),onAuthChange=()=>{},onSyncChange=()=>{}}={}){
  const [appModule,authModule,firestoreModule]=injected||await Promise.all([import(SDK+'firebase-app.js'),import(SDK+'firebase-auth.js'),import(SDK+'firebase-firestore.js')]);
  const app=appModule.initializeApp(config,'stockbook-mobile-b'),auth=authModule.getAuth(app),db=firestoreModule.getFirestore(app);
  let baseline=null,raw=null,model=null,customNamespace='',busy=false,epoch=0,emailLoginPending=false;
+ // confirmed: the ledger as last read from or written to the cloud. raw/model may be ahead of it while saves are syncing.
+ let confirmed=null,queued=null,flushing=null;
  const nativeAuth=createNativeAuth({auth,sdk:authModule,getEpoch:()=>epoch,getLedgerContext:()=>baseline?{ownerUid:baseline.main.ownerUid,namespace:baseline.ns}:null});
  function identity(){const u=auth.currentUser;if(!u?.email||!u.emailVerified)throw new Error('請使用已驗證的 Google 帳號登入。');return {uid:u.uid,email:u.email,displayName:u.displayName||''};}
  function refs(ns,count){return Array.from({length:count},(_,i)=>firestoreModule.doc(db,'stockLedgers',ns,'chunks','chunk_'+i));}
@@ -47,11 +49,12 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
  }
  async function reload({namespace=customNamespace,portfolioId=model?.portfolioId||'',account=model?.account||'all'}={}){
   if(busy)throw new Error('正在儲存，請稍候。');
+  await idle();
   const who=identity(),ticket=++epoch,ns=namespaceFor(who.email,namespace),shot=await readSnapshot(ns);
   const next=typeof shot.payload==='string'?await decodeLedger(shot.payload):structuredClone(shot.payload);
   const projected=projectLedger(next,who,portfolioId,account);projected.updatedAt=shot.main.updatedAt||'';
   if(ticket!==epoch||auth.currentUser?.uid!==who.uid)throw new Error('登入狀態已改變，請重新載入。');
-  baseline=shot;raw=next;model=projected;customNamespace=namespace;
+  baseline=shot;raw=next;confirmed=next;model=projected;customNamespace=namespace;
   return model;
  }
  // First use: Firestore rules can't read a document that doesn't exist, so a read-then-write transaction can't tell "missing" from "denied".
@@ -80,40 +83,77 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
   finally{busy=false;}
   return reload({namespace:wanted});
  }
- async function commit(operation){
+ // Saving feels instant, like A: the change is checked and shown at once, then written to the cloud in the background.
+ // Each write still checks the cloud against the last version B read or wrote, so A's or another device's edits are never overwritten.
+ // Saves made while one is syncing are merged into the next write. If a write fails, B reloads the cloud ledger
+ // (so the screen never shows changes that are not in the cloud) and reports it through onSyncChange.
+ async function commit(operation,{wait=false}={}){
   if(busy)throw new Error('正在儲存，請勿重複送出。');
   if(!baseline||!raw||!model)throw new Error('請先載入原本的雲端帳本。');
   const who=identity(),base=baseline,ticket=epoch,priorModel=model;
   if(base.ns!==namespaceFor(who.email,customNamespace))throw new Error('帳本名稱已改變，請重新載入。');
-  busy=true;
-  try{
-   const candidate=buildOperation(raw,who,priorModel.portfolioId,operation),payload=await compressLedger(candidate),chunks=[];
-   for(let i=0;i<payload.length;i+=800000)chunks.push(payload.slice(i,i+800000));
-   if(chunks.length>200)throw new Error('帳本超過 B 版可儲存的大小，這次未修改雲端資料。');
-   const updatedAt=new Date().toISOString(),bRevision=crypto.randomUUID();
-   await firestoreModule.runTransaction(db,async tx=>{
-    if(epoch!==ticket||auth.currentUser?.uid!==who.uid)throw new Error('登入狀態已改變，儲存已取消。');
-    // Head and chunks are read together (one round trip instead of two); the checks are unchanged.
-    const headRef=firestoreModule.doc(db,'stockLedgers',base.ns),oldRefs=refs(base.ns,base.chunks.length);
-    const [head,...oldShots]=await Promise.all([headRef,...oldRefs].map(ref=>tx.get(ref)));
-    if(!head.exists()||canonical(head.data())!==canonical(base.main))throw conflictError();
-    oldShots.forEach((shot,i)=>{if(!shot.exists()||canonical(shot.data())!==canonical(base.chunks[i]))throw conflictError();});
-    if(epoch!==ticket||auth.currentUser?.uid!==who.uid)throw new Error('登入狀態已改變，儲存已取消。');
-    const main={...base.main,namespace:base.ns,ownerUid:who.uid,ownerEmail:who.email,updatedAt,chunkCount:chunks.length,isCompressed:true,bRevision};
-    delete main.state;
-    tx.set(headRef,main);
-    const nextRefs=refs(base.ns,chunks.length);
-    chunks.forEach((data,index)=>tx.set(nextRefs[index],{index,data,ownerUid:who.uid,updatedAt}));
-    for(let i=chunks.length;i<base.chunks.length;i++)tx.delete(oldRefs[i]);
-   });
-   // Clear the old baseline immediately: a failed verification cannot trigger another stale write.
-   baseline=null;
-   if(epoch!==ticket||auth.currentUser?.uid!==who.uid)throw new Error('雲端儲存已完成，但登入狀態已改變，請重新登入確認。');
-   const projected=projectLedger(candidate,who,priorModel.portfolioId,priorModel.account);projected.updatedAt=updatedAt;
-   baseline={ns:base.ns,main:{...base.main,namespace:base.ns,ownerUid:who.uid,ownerEmail:who.email,updatedAt,chunkCount:chunks.length,isCompressed:true,bRevision},chunks:chunks.map((data,index)=>({index,data,ownerUid:who.uid,updatedAt})),payload};
-   delete baseline.main.state;raw=candidate;model=projected;
-   return model;
-  }finally{busy=false;}
+  const candidate=buildOperation(raw,who,priorModel.portfolioId,operation);
+  const projected=projectLedger(candidate,who,priorModel.portfolioId,priorModel.account);projected.updatedAt=priorModel.updatedAt;
+  raw=candidate;model=projected;
+  queued={raw:candidate,who,ticket,count:(queued?.count||0)+1};
+  const done=flush();
+  if(wait){await done;return model;}
+  done.catch(()=>{});
+  return model;
+ }
+ function syncing(){return !!(flushing||queued);}
+ function notify(extra={}){try{onSyncChange({pending:syncing(),...extra},client);}catch(error){console.error(error);}}
+ async function idle(){while(flushing)await flushing.catch(()=>{});}
+ function flush(){
+  if(flushing)return flushing;
+  flushing=(async()=>{
+   let failure=null,lost=0,ticket=epoch;
+   while(queued&&!failure){
+    const job=queued;queued=null;lost=job.count;ticket=job.ticket;notify();
+    try{await write(job);}catch(error){failure=error;lost+=queued?.count||0;queued=null;}
+   }
+   flushing=null;
+   if(!failure){notify();return;}
+   if(ticket===epoch){
+    // Never leave unsaved changes on screen: fall back to the last cloud version, then try to read the newest one.
+    baseline=null;
+    if(confirmed){raw=confirmed;try{const who=identity();model=projectLedger(raw,who,model?.portfolioId||'',model?.account||'all');}catch{}}
+    try{await reload();}catch(error){console.error(error);}
+   }
+   notify({error:failure,lost});
+   throw failure;
+  })();
+  return flushing;
+ }
+ async function write({raw:candidate,who,ticket}){
+  const base=baseline;
+  if(epoch!==ticket||auth.currentUser?.uid!==who.uid)throw new Error('登入狀態已改變，儲存已取消。');
+  if(!base)throw new Error('請先載入原本的雲端帳本。');
+  const payload=await compressLedger(candidate),chunks=[];
+  for(let i=0;i<payload.length;i+=800000)chunks.push(payload.slice(i,i+800000));
+  if(chunks.length>200)throw new Error('帳本超過 B 版可儲存的大小，這次未修改雲端資料。');
+  const updatedAt=new Date().toISOString(),bRevision=crypto.randomUUID();
+  await firestoreModule.runTransaction(db,async tx=>{
+   if(epoch!==ticket||auth.currentUser?.uid!==who.uid)throw new Error('登入狀態已改變，儲存已取消。');
+   // Head and chunks are read together (one round trip instead of two); the checks are unchanged.
+   const headRef=firestoreModule.doc(db,'stockLedgers',base.ns),oldRefs=refs(base.ns,base.chunks.length);
+   const [head,...oldShots]=await Promise.all([headRef,...oldRefs].map(ref=>tx.get(ref)));
+   if(!head.exists()||canonical(head.data())!==canonical(base.main))throw conflictError();
+   oldShots.forEach((shot,i)=>{if(!shot.exists()||canonical(shot.data())!==canonical(base.chunks[i]))throw conflictError();});
+   if(epoch!==ticket||auth.currentUser?.uid!==who.uid)throw new Error('登入狀態已改變，儲存已取消。');
+   const main={...base.main,namespace:base.ns,ownerUid:who.uid,ownerEmail:who.email,updatedAt,chunkCount:chunks.length,isCompressed:true,bRevision};
+   delete main.state;
+   tx.set(headRef,main);
+   const nextRefs=refs(base.ns,chunks.length);
+   chunks.forEach((data,index)=>tx.set(nextRefs[index],{index,data,ownerUid:who.uid,updatedAt}));
+   for(let i=chunks.length;i<base.chunks.length;i++)tx.delete(oldRefs[i]);
+  });
+  // Clear the old baseline immediately: a failed verification cannot trigger another stale write.
+  baseline=null;
+  if(epoch!==ticket||auth.currentUser?.uid!==who.uid)throw new Error('雲端儲存已完成，但登入狀態已改變，請重新登入確認。');
+  baseline={ns:base.ns,main:{...base.main,namespace:base.ns,ownerUid:who.uid,ownerEmail:who.email,updatedAt,chunkCount:chunks.length,isCompressed:true,bRevision},chunks:chunks.map((data,index)=>({index,data,ownerUid:who.uid,updatedAt})),payload};
+  delete baseline.main.state;confirmed=candidate;
+  if(model)model.updatedAt=updatedAt;
  }
  // Google Drive backup uses A's existing Cloud Functions (asia-east1); the functions themselves are unchanged.
  let functions=null;
@@ -145,8 +185,8 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
    finally{emailLoginPending=false;publishAuth(auth.currentUser);}
   },
   async signIn(redirect=false){const provider=new authModule.GoogleAuthProvider();provider.setCustomParameters({prompt:'select_account'});if(redirect)return authModule.signInWithRedirect(auth,provider);return authModule.signInWithPopup(auth,provider);},
-  async signOut(){epoch++;driveAccess=null;baseline=null;raw=null;model=null;return authModule.signOut(auth);},
-  reload,commit,createLedger,
+  async signOut(){epoch++;driveAccess=null;baseline=null;raw=null;confirmed=null;queued=null;model=null;return authModule.signOut(auth);},
+  reload,commit,createLedger,idle,
   view(){return model;},
   select(portfolioId,account='all'){if(!raw)throw new Error('請先載入帳本。');model=projectLedger(raw,identity(),portfolioId,account);model.updatedAt=baseline?.main.updatedAt||'';return model;},
   costs(fields){if(!raw||!model)return {fee:0,tax:0};return estimateCosts(raw,identity(),model.portfolioId,fields);},
@@ -166,9 +206,9 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
   driveConnect(){return callFunction('startDriveAuthorization',{namespace:baseline?.ns||namespaceFor(identity().email,customNamespace)});},
   driveRunNow(){return callFunction('runBackupNow');},
   driveDisconnect(){return callFunction('disconnectDrive');},
-  get user(){return auth.currentUser;},get namespace(){return baseline?.ns||'';},get busy(){return busy;}
+  get user(){return auth.currentUser;},get namespace(){return baseline?.ns||'';},get busy(){return busy;},get syncing(){return syncing();}
  };
- function publishAuth(user){epoch++;driveAccess=null;baseline=null;raw=null;model=null;onAuthChange(user,client);}
+ function publishAuth(user){epoch++;driveAccess=null;baseline=null;raw=null;confirmed=null;queued=null;model=null;onAuthChange(user,client);}
  authModule.onAuthStateChanged(auth,user=>{if(!emailLoginPending)publishAuth(user);});
  try{nativeAuth.completeRedirectReauthentication(await authModule.getRedirectResult(auth));}catch(error){onAuthChange(auth.currentUser,client,error);}
  return client;

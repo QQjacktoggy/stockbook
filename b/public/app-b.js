@@ -188,7 +188,7 @@ function submitTrade(f){if(!f.reportValidity())return;
  const kind=f.elements.buyKind.value;if((kind==='rebuy'&&!pickedIds(f,'rebuyPick'))||(kind==='cycle'&&!pickedIds(f,'cyclePick'))){f.querySelector('#form-error').innerHTML='<div class="error">'+(kind==='rebuy'?'請勾選要回補哪幾筆買回計畫，或改選一般買進。':'請選擇要回補哪一筆借券，或改選一般買進。')+'</div>';f.querySelector('#form-error').scrollIntoView({block:'nearest'});return;}
  // Like A's double confirmation: a second tap is needed before amounts on a matched trade are recomputed.
  if(f.dataset.linked&&f.dataset.confirmed!=='1'&&financialEdit(f)){f.dataset.confirmed='1';f.querySelector('#form-error').innerHTML='<div class="alert">修改這筆已配對的交易會重新計算庫存配對、買回與損益。確認無誤請再按一次「確認修改」。</div>';f.querySelector('[type="submit"]').textContent='確認修改';f.querySelector('#form-error').scrollIntoView({block:'nearest'});return;}
- const b=f.querySelector('[type="submit"]'),who=client.user?.uid;const label=b.textContent;b.disabled=true;b.textContent='正在儲存…';f.querySelector('#form-error').innerHTML='';client.commit({kind:'upsertTransaction',id:f.dataset.editId,fields:formFields()}).then(next=>{if(client.user?.uid!==who)return;setState(next);if(f.isConnected)closeSheet(false);render();toast('已儲存到共用帳本');}).catch(e=>{const box=f.querySelector('#form-error');if(f.isConnected&&box){box.innerHTML='<div class="error">'+esc(errorText(e))+'</div>';box.scrollIntoView({block:'nearest'});}else toast(errorText(e));}).finally(()=>{if(b.isConnected){b.disabled=false;b.textContent=label;}});}
+ const b=f.querySelector('[type="submit"]'),who=client.user?.uid;const label=b.textContent;b.disabled=true;b.textContent='正在儲存…';f.querySelector('#form-error').innerHTML='';client.commit({kind:'upsertTransaction',id:f.dataset.editId,fields:formFields()}).then(next=>{if(client.user?.uid!==who)return;setState(next);if(f.isConnected)closeSheet(false);render();toast(client.syncing?'已儲存，正在同步到雲端':'已儲存到共用帳本');}).catch(e=>{const box=f.querySelector('#form-error');if(f.isConnected&&box){box.innerHTML='<div class="error">'+esc(errorText(e))+'</div>';box.scrollIntoView({block:'nearest'});}else toast(errorText(e));}).finally(()=>{if(b.isConnected){b.disabled=false;b.textContent=label;}});}
 function inventoryDetail(code){const g=stockGroups().find(x=>x.code===code),s=stocks[code];if(!g)return;sheet(stockName(code)+' · '+ticker(code),'<div class="big-detail qp-big"><span>'+fmt(g.qty)+'<i>股</i></span><span><i>均價</i>'+fmt(Math.round(g.cost/g.qty*100)/100)+'</span><span class="hint" style="display:block">目前可賣股數 · 平均成本</span></div><dl class="definition"><div><dt>剩餘成本</dt><dd>'+money(g.cost)+'</dd></div><div><dt>帳本最新報價</dt><dd>'+(s?.price!=null?fmt(s.price):'尚無報價')+'</dd></div><div><dt>報價時間</dt><dd>'+esc(s?.quoteTime?stamp(s.quoteTime):'尚無報價')+'</dd></div></dl><h3 class="mini-heading">各筆買進</h3>'+g.lots.map(l=>'<div class="lot"><span><b class="qp">'+fmt(l.qty)+' 股 × '+fmt(l.cost)+'</b><small>'+esc(slash(l.date))+' · '+esc(accountName(l.account))+(l.borrowed?' · 借出 '+fmt(l.borrowed)+' 股':'')+(l.adjusted?' · 已成本交換':'')+'</small></span></div>').join('')
  +exchangeList(code)+'<div class="sheet-actions"><button class="secondary buy-text" data-new="buy" data-code="'+esc(code)+'">再買進</button><button class="primary sell" data-new="sell" data-code="'+esc(code)+'">記一筆賣出</button></div><div class="sheet-actions" style="margin-top:10px"><button class="secondary" data-new="sell" data-borrow="sell" data-code="'+esc(code)+'">借券賣出</button><button class="secondary" data-exchange="'+esc(code)+'">成本交換</button></div>');}
 function exchangeList(code){const list=selected(state.exchanges).filter(x=>x.code===code);return list.length?'<h3 class="mini-heading">成本交換</h3>'+list.map(x=>'<div class="lot"><span><b class="qp">'+fmt(x.shares)+' 股 '+fmt(x.originalPrice)+' → '+fmt(x.finalPrice)+'</b><small>'+esc(slash(x.date))+'</small><small>外部成本 '+fmt(x.externalPrice)+(x.redistributed?' · 其他批次調降 '+fmt(x.redistributed):'')+(x.label?' · '+esc(x.label):'')+'</small></span>'+(x.deletable?'<button class="link" data-delete-exchange="'+esc(x.id)+'">撤銷</button>':'<small>已賣出或借出，不能撤銷</small>')+'</div>').join(''):'';}
@@ -428,6 +428,17 @@ function accountName(id){return accounts.find(a=>a.id===id)?.name||'已停用帳
 function stamp(v){if(!v)return '尚無時間';const d=new Date(v);return Number.isNaN(d.valueOf())?v:new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',dateStyle:'short',timeStyle:'short',hour12:false}).format(d);}
 
 function setState(next){state=next;stocks=next.stocks;accounts=next.accounts;}
+// Saves return at once and sync in the background (cloud-client commit). The badge shows a pending write; a failed one
+// puts the screen back to the cloud version and stays on screen until dismissed, so it can't be missed like a toast.
+function syncChanged({pending,error,lost},api){
+ if(api!==client)return;
+ $('#sync-status').hidden=!pending;
+ if(!error||!identity)return;
+ const view=api.view();if(view){setState(view);render();}
+ $('#sync-error').innerHTML='<div class="error"><span>剛才 '+(lost||1)+' 筆修改沒有存到雲端：'+esc(errorText(error))+' 畫面已改回雲端上最新的帳本，請檢查後再輸入一次沒存到的部分。</span><button class="link" data-dismiss-sync>知道了</button></div>';
+ $('#sync-error').hidden=false;
+}
+addEventListener('beforeunload',e=>{if(client?.syncing){e.preventDefault();e.returnValue='';}});
 
 function reconItems(){return selected(state.reconciliation.map(x=>({...x,account:x.brokerAccountId})));}
 function issues(){return reconItems().filter(x=>!x.settled);}
@@ -463,6 +474,7 @@ function reload(){loading=true;authError='';if(!state)render();return client.rel
 
 async function click(b){
  if(b.hasAttribute('data-close'))return closeSheet();
+ if(b.hasAttribute('data-dismiss-sync')){$('#sync-error').hidden=true;$('#sync-error').innerHTML='';return;}
  if(b.hasAttribute('data-login')||b.hasAttribute('data-login-redirect')){if(!client)throw new Error('Firebase 尚未連接，請重新整理後再試。');if(identity)return reload();return client.signIn(b.hasAttribute('data-login-redirect'));}
  if(!state)return;
  if(b.hasAttribute('data-native-settings'))return accountSecuritySheet();
@@ -496,7 +508,7 @@ async function click(b){
  if(b.hasAttribute('data-backup-download')){b.disabled=true;try{await downloadBackup();toast('已下載可驗證的 JSON 備份檔');}finally{if(b.isConnected)b.disabled=false;}return;}
  if(b.hasAttribute('data-backup-restore')){const input=$('#restore-file');if(input){input.value='';input.click();}return;}
  if(b.hasAttribute('data-restore-safety')){b.disabled=true;try{await downloadBackup('PRE_RESTORE');b.textContent='已下載安全備份（可再下載一次）';const ok=$('#restore-ok');if(ok)ok.disabled=false;}finally{if(b.isConnected)b.disabled=false;}return;}
- if(b.hasAttribute('data-confirm-restore')){if(!$('#restore-ok')?.checked)return;const info=pendingRestore;if(!info)return;b.disabled=true;b.textContent='正在還原…';try{setState(await client.commit({kind:'restoreBackup',state:info.state,createdAt:info.createdAt,source:info.source}));pendingRestore=null;closeSheet(false);render();toast('已建立安全備份並完成還原');}finally{if(b.isConnected){b.disabled=false;b.textContent='2. 還原';}}return;}
+ if(b.hasAttribute('data-confirm-restore')){if(!$('#restore-ok')?.checked)return;const info=pendingRestore;if(!info)return;b.disabled=true;b.textContent='正在還原…';try{setState(await client.commit({kind:'restoreBackup',state:info.state,createdAt:info.createdAt,source:info.source},{wait:true}));pendingRestore=null;closeSheet(false);render();toast('已建立安全備份並完成還原');}finally{if(b.isConnected){b.disabled=false;b.textContent='2. 還原';}}return;}
  if(b.hasAttribute('data-drive-connect')){b.disabled=true;try{const r=await client.driveConnect();if(!r?.url)throw new Error('無法建立 Google Drive 授權連結。');const w=window.open(r.url,'_blank');if(!w)window.location.assign(r.url);else{w.opener=null;driveStatus=null;closeSheet(false);toast('請在新視窗完成授權，回來後再開啟「資料備份」確認');}}finally{if(b.isConnected)b.disabled=false;}return;}
  if(b.hasAttribute('data-drive-run')){b.disabled=true;b.textContent='正在備份…';try{const r=await client.driveRunNow();driveStatus=await client.driveStatus();backupSheet();toast('Google Drive 備份完成'+(r?.fileName?'：'+r.fileName:''));}finally{if(b.isConnected){b.disabled=false;b.textContent='立即備份';}}return;}
  if(b.hasAttribute('data-drive-folder')){if(driveStatus?.folderId)window.open('https://drive.google.com/drive/folders/'+encodeURIComponent(driveStatus.folderId),'_blank','noopener');return;}
@@ -507,7 +519,7 @@ async function click(b){
  if(b.hasAttribute('data-reload'))return reload();
  if(b.hasAttribute('data-backup'))return sheet('連線與儲存狀態','<dl class="definition"><div><dt>Google 帳號</dt><dd>'+esc(state.user.email)+'</dd></div><div><dt>雲端帳本</dt><dd>'+esc(client.namespace)+'</dd></div><div><dt>上次載入／儲存</dt><dd>'+esc(stamp(state.updatedAt))+'</dd></div><div><dt>資料寫入</dt><dd>A、B 共用正式資料</dd></div></dl><button class="primary wide" data-reload>重新載入最新資料</button>');
  if(b.hasAttribute('data-original'))return sheet('原本的完整功能','<p class="notice">A 版的功能都已經可以在 B 版使用。切換完成前 A 版仍可開啟；請不要同時在 A、B 修改。</p><a class="primary wide" style="display:block;text-align:center;text-decoration:none" href="https://jackstock-ed2d2.web.app" target="_blank" rel="noopener">開啟 A 版</a>');
- if(b.hasAttribute('data-logout'))return client.signOut();
+ if(b.hasAttribute('data-logout')){await client.idle();return client.signOut();}
  if(b.dataset.edit){const t=state.trades.find(x=>x.id===b.dataset.edit);return t.cash?cashForm(t.type,t.id):form(t.type,t.code,t.id);}
  if(b.dataset.newCash)return cashForm(b.dataset.newCash);
  if(b.dataset.cashType)return cashForm(b.dataset.cashType,'',cashSnapshot($('#cash-form')));
@@ -581,8 +593,8 @@ document.addEventListener('submit',e=>{if(e.target.id==='email-login-form'){e.pr
  if(e.target.id==='security-form'&&e.target.dataset.editId){e.preventDefault();const f=e.target;submitForm(f,{kind:'updateSecurity',id:f.dataset.editId,fields:Object.fromEntries(new FormData(f))},()=>toast('股票已更新'));}
  else if(e.target.id==='security-form'){e.preventDefault();const f=e.target,fields=Object.fromEntries(new FormData(f)),back=returnForm;submitForm(f,{kind:'createSecurity',fields},next=>{const code=Object.keys(next.stocks).find(k=>next.stocks[k].symbol===String(fields.symbol).trim().toUpperCase());toast('已新增 '+String(fields.symbol).trim().toUpperCase());if(back)form(back.type||'buy','','',{...back,code,price:''});});}if(e.target.id==='namespace-form'){e.preventDefault();const namespace=new FormData(e.target).get('namespace');if(!identity){authError='請先登入原有帳號。';return render();}loading=true;lastNamespace=namespace;client.reload({namespace}).then(next=>{setState(next);authError='';noLedger=false;render();}).catch(error=>{authError=errorText(error);noLedger=missingLedger(error);render();}).finally(()=>{loading=false;render();});}});
 render();loading=true;render();
-createLedgerClient(window.stockLedgerFirebaseConfig,{onAuthChange:async(user,api,error)=>{
-const ticket=++authEpoch;client=api;identity=user;state=null;loading=!!user;authError=error?errorText(error):'';closeSheet(false);render();
+createLedgerClient(window.stockLedgerFirebaseConfig,{onSyncChange:syncChanged,onAuthChange:async(user,api,error)=>{
+const ticket=++authEpoch;client=api;identity=user;state=null;$('#sync-error').hidden=true;$('#sync-status').hidden=true;loading=!!user;authError=error?errorText(error):'';closeSheet(false);render();
 noLedger=false;lastNamespace='';if(user&&!error){try{const next=await api.reload();if(ticket===authEpoch){setState(next);page='home';authError='';}}catch(e){if(ticket===authEpoch){authError=errorText(e);noLedger=missingLedger(e);}}finally{if(ticket===authEpoch){loading=false;render();}}}else{loading=false;render();}
 }}).then(api=>{client=api;loading=false;if(!state)render();}).catch(error=>{authError=errorText(error);loading=false;render();});
 
