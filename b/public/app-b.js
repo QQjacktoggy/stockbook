@@ -130,29 +130,38 @@ function form(type='buy',code='',id='',keep={}){
  if(needAccounts())return;
  if(!Object.keys(stocks).length)return securitySheet({type,...keep});
  const old=id?state.trades.find(x=>x.id===id):null;type=old?.type||type;const sell=type==='sell';
- const task=!old&&keep.rebuyIds?state.rebuy.find(r=>r.id===keep.rebuyIds):null;
- // Borrow buy-back (A: 回補借券任務) is tied to one cycle; a borrow sell lends shares from chosen lots.
- const cyc=old?.borrow==='REBUY_FILL'?state.cycles.find(c=>c.id===old.cycle):!old&&keep.cycle?state.cycles.find(c=>c.id===keep.cycle):null;
+ // A's 買入用途: a new buy is 一般買進, a buy-back of open 買回計畫 (several allowed), or a 借券回補 of one cycle.
+ const kind=sell||old?'':keep.buyKind||(keep.rebuyIds?'rebuy':keep.cycle?'cycle':'new');
+ const cyc=old?.borrow==='REBUY_FILL'?state.cycles.find(c=>c.id===old.cycle):null;
  const borrowSell=old?old.borrow==='BORROW_SELL':sell&&keep.borrow==='sell';
- const lockPlace=!!task||!!cyc||!!old?.rebuyIds||!!old?.borrow;
+ const lockPlace=!!old?.rebuyIds||!!old?.borrow;
+ const openRebuy=state.rebuy,openCyc=state.cycles.filter(c=>c.remaining>0);
+ const from=kind==='rebuy'&&keep.rebuyIds?openRebuy.find(r=>r.id===String(keep.rebuyIds).split(',')[0]):kind==='cycle'&&keep.cycle?openCyc.find(c=>c.id===keep.cycle):null;
  const holder=code&&state.account==='all'?accounts.find(a=>a.id!=='all'&&heldCodes(a.id).includes(code)):null;
- const acc=old?.account||task?.account||cyc?.account||keep.account||(state.account==='all'?(holder||accounts.find(a=>a.id!=='all')).id:state.account);
- const held=heldCodes(acc),codes=lockPlace?[old?.code||task?.code||cyc.code]:sell&&!old&&held.length?held:Object.keys(stocks);
- const symbol=old?.code||(codes.includes(code)?code:'')||(codes.includes(keep.code)?keep.code:'')||codes[0];
+ const acc=old?.account||from?.account||keep.account||(state.account==='all'?(holder||accounts.find(a=>a.id!=='all')).id:state.account);
+ const pool=kind==='rebuy'?openRebuy.filter(r=>r.account===acc):kind==='cycle'?openCyc.filter(c=>c.account===acc):[],poolCodes=[...new Set(pool.map(x=>x.code))].filter(c=>stocks[c]);
+ const held=heldCodes(acc),codes=lockPlace?[old.code]:sell&&!old&&held.length?held:poolCodes.length?poolCodes:Object.keys(stocks);
+ const symbol=old?.code||(codes.includes(code)?code:'')||(codes.includes(from?.code)?from.code:'')||(codes.includes(keep.code)?keep.code:'')||codes[0];
  if(old&&!accounts.some(a=>a.id===acc))return toast('這筆交易的帳戶已停用，請在 A 版處理。');
- const cat=task||old?.rebuyIds?'REBUY':old?.category||keep.category||'LONG_TERM',cats=Object.keys(CATEGORY_NAMES).concat(Object.hasOwn(CATEGORY_NAMES,cat)?[]:[cat]);
- const price=old?.price||(symbol===keep.code&&keep.price)||task?.target||stocks[symbol]?.price||cyc?.price||'',qty=old?.qty||keep.qty||task?.qty||cyc?.remaining||100,word=borrowSell?'借券賣出':cyc?'借券回補':sell?'賣出':'買進';
- const minDate=task?.date||cyc?.date||'',accountChoices=accounts.filter(a=>a.id!=='all'&&(!lockPlace||a.id===acc));
- sheet(task?'記錄買回':old?'編輯'+word:'記一筆'+word,'<form id="trade-form" class="'+type+'" data-edit-id="'+esc(id)+'" data-lots-touched="'+(old?'1':'')+'" data-linked="'+(old&&(old.linked||old.aligned||old.borrow)?'1':'')+'"><div id="form-error" role="alert"></div><input type="hidden" name="rebuyIds" value="'+esc(task?.id||'')+'"><input type="hidden" name="cycle" value="'+esc(!old&&cyc?cyc.id:'')+'"><input type="hidden" name="borrow" value="'+(borrowSell?'sell':'')+'">'
- +'<div class="tabs type-tabs"><button type="button" class="'+(!sell?'active':'')+'" data-form-type="buy" aria-pressed="'+!sell+'" '+(old||task||cyc?'disabled':'')+'>買進</button><button type="button" class="'+(sell?'active':'')+'" data-form-type="sell" aria-pressed="'+sell+'" '+(old||task||cyc?'disabled':'')+'>賣出</button></div><input type="hidden" name="type" value="'+type+'">'
- +(sell&&!old?'<label class="check-row"><input type="checkbox" id="f-borrow" '+(borrowSell?'checked':'')+'><span><b>借券賣出</b><small>股票借出賣掉，之後再回補；庫存不會配對結清</small></span></label>':'')
+ const picks=pool.filter(x=>x.code===symbol),want=kind==='rebuy'?String(keep.rebuyIds||'').split(',').filter(Boolean):[keep.cycle].filter(Boolean);
+ let chosen=picks.filter(x=>want.includes(x.id));if(!chosen.length&&picks.length===1&&!Object.hasOwn(keep,'rebuyIds')&&!Object.hasOwn(keep,'cycle'))chosen=picks.slice();
+ const pickQty=chosen.reduce((s,x)=>s+(kind==='cycle'?x.remaining:x.qty),0),buyBack=kind==='rebuy'||!!old?.rebuyIds;
+ const cat=buyBack?'REBUY':old?.category||keep.category||'LONG_TERM',cats=Object.keys(CATEGORY_NAMES).concat(Object.hasOwn(CATEGORY_NAMES,cat)?[]:[cat]);
+ const price=old?.price||(symbol===keep.code&&keep.price)||(kind==='rebuy'&&chosen[0]?.target)||stocks[symbol]?.price||(kind==='cycle'&&chosen[0]?.price)||'',qty=old?.qty||keep.qty||pickQty||100,word=borrowSell?'借券賣出':cyc||kind==='cycle'?'借券回補':kind==='rebuy'?'買回':sell?'賣出':'買進';
+ const minDate=chosen.map(x=>x.date).sort().pop()||cyc?.date||'',accountChoices=accounts.filter(a=>a.id!=='all'&&(!lockPlace||a.id===acc));
+ const kindTab=(attr,v,label,on)=>'<button type="button" class="'+(on?'active':'')+'" '+attr+'="'+v+'" aria-pressed="'+on+'">'+label+'</button>',count=n=>n?' '+n:'';
+ const kindTabs=kind?'<div class="tabs kind-tabs" role="group" aria-label="買入用途">'+kindTab('data-buy-kind','new','一般買進',kind==='new')+kindTab('data-buy-kind','rebuy','買回計畫'+count(openRebuy.filter(r=>r.account===acc).length),kind==='rebuy')+kindTab('data-buy-kind','cycle','借券回補'+count(openCyc.filter(c=>c.account===acc).length),kind==='cycle')+'</div>'
+  :sell&&!old?'<div class="tabs kind-tabs" role="group" aria-label="賣出方式">'+kindTab('data-sell-kind','','一般賣出',!borrowSell)+kindTab('data-sell-kind','sell','借券賣出',borrowSell)+'</div>'+(borrowSell?'<p class="hint kind-hint">股票借出賣掉，之後用「借券回補」買回；庫存不會配對結清，也不列入買回計畫。</p>':''):'';
+ const pickList=kind==='rebuy'||kind==='cycle'?(picks.length?'<fieldset class="lots buy-picks"><legend>'+(kind==='rebuy'?'回補哪幾筆買回計畫 · 可複選':'回補哪一筆借券')+'</legend>'+picks.map(x=>'<label class="lot"><input type="'+(kind==='rebuy'?'checkbox" name="rebuyPick':'radio" name="cyclePick')+'" value="'+esc(x.id)+'" '+(chosen.includes(x)?'checked':'')+'><span>'+(kind==='rebuy'?'<b class="qp">待買回 '+fmt(x.qty)+' 股</b><small>'+esc(short(x.date))+' 以 '+fmt(x.price)+' 賣出 · 參考買回價 '+fmt(x.target)+'</small>':'<b class="qp">待回補 '+fmt(x.remaining)+' 股</b><small>'+esc(short(x.date))+' 借券賣出 '+fmt(x.qty)+' 股 × '+fmt(x.price)+'</small>')+'</span></label>').join('')+'</fieldset>'
+  :'<p class="hint">這個帳戶沒有'+(kind==='rebuy'?'待買回的計畫':'待回補的借券')+'，請改選一般買進或其他帳戶。</p>'):'';
+ sheet(old?'編輯'+word:kind==='rebuy'?'記錄買回':'記一筆'+word,'<form id="trade-form" class="'+type+'" data-edit-id="'+esc(id)+'" data-lots-touched="'+(old?'1':'')+'" data-linked="'+(old&&(old.linked||old.aligned||old.borrow)?'1':'')+'"><div id="form-error" role="alert"></div><input type="hidden" name="buyKind" value="'+kind+'"><input type="hidden" name="borrow" value="'+(borrowSell?'sell':'')+'">'
+ +'<div class="tabs type-tabs"><button type="button" class="'+(!sell?'active':'')+'" data-form-type="buy" aria-pressed="'+!sell+'" '+(old?'disabled':'')+'>買進</button><button type="button" class="'+(sell?'active':'')+'" data-form-type="sell" aria-pressed="'+sell+'" '+(old?'disabled':'')+'>賣出</button></div><input type="hidden" name="type" value="'+type+'">'+kindTabs
  +'<div class="form-field"><label for="f-account">券商帳戶</label><select id="f-account" name="account">'+accountChoices.map(a=>'<option value="'+esc(a.id)+'" '+(acc===a.id?'selected':'')+'>'+esc(a.full)+'</option>').join('')+'</select></div>'
- +'<div class="form-field"><label for="f-stock">股票'+(sell&&!old&&held.length?' <small>只列這個帳戶有庫存的</small>':'')+'</label><select id="f-stock" name="code">'+codes.map(k=>'<option value="'+esc(k)+'" '+(symbol===k?'selected':'')+'>'+esc(stocks[k].symbol+' '+stocks[k].name)+'</option>').join('')+'</select>'+(!lockPlace&&!sell?'<button type="button" class="link" data-new-security>'+icon('plus')+'清單沒有？新增股票</button>':'')+'<p class="avail" id="availability"></p></div>'
+ +'<div class="form-field"><label for="f-stock">股票'+(sell&&!old&&held.length?' <small>只列這個帳戶有庫存的</small>':'')+'</label><select id="f-stock" name="code">'+codes.map(k=>'<option value="'+esc(k)+'" '+(symbol===k?'selected':'')+'>'+esc(stocks[k].symbol+' '+stocks[k].name)+'</option>').join('')+'</select>'+(!lockPlace&&!sell?'<button type="button" class="link" data-new-security>'+icon('plus')+'清單沒有？新增股票</button>':'')+'<p class="avail" id="availability"></p></div>'+pickList
  +'<div class="form-pair"><div class="form-field"><label for="f-date">成交日期</label><input id="f-date" name="date" type="date" max="'+today()+'" '+(minDate?'min="'+esc(minDate)+'" ':'')+'value="'+esc(old?.date||keep.date||today())+'" required></div><div class="form-field"><label for="f-time">成交時間 <small>選填</small></label><input id="f-time" name="time" type="time" value="'+esc(old?.time||keep.time||'')+'"></div></div>'
  +'<div class="form-pair"><div class="form-field"><label for="f-price">成交價格</label><input id="f-price" name="price" type="number" inputmode="decimal" min="0.01" step="0.01" value="'+price+'" required></div><div class="form-field"><label for="f-qty">股數</label><input id="f-qty" name="qty" type="number" inputmode="numeric" min="1" step="1" value="'+qty+'" required></div></div>'
  +'<div id="sell-options"></div><div class="form-preview"><span id="estimate-label"></span><b id="estimate"></b></div>'
- +'<details class="details"><summary>手續費、交易稅、分類與備註</summary><div class="form-pair"><div class="form-field"><label for="f-fee">手續費</label><input id="f-fee" name="fee" type="number" inputmode="numeric" min="0" step="0.01" value="'+esc(old?.fee??keep.fee??'')+'" placeholder="依帳本費率估算"></div><div class="form-field"><label for="f-tax">交易稅</label><input id="f-tax" name="tax" type="number" inputmode="numeric" min="0" step="0.01" value="'+esc(old?.tax??keep.tax??'')+'" placeholder="依帳本費率估算"></div></div><p class="hint">留白使用帳本的券商費率；填寫時採用實際金額。</p><div class="form-field"><label for="f-category">策略分類</label><select id="f-category" name="category">'+(task||old?.rebuyIds?['REBUY']:cats).map(v=>'<option value="'+esc(v)+'" '+(cat===v?'selected':'')+'>'+esc(categoryName(v))+'</option>').join('')+'</select></div><div class="form-field"><label for="f-note">備註</label><textarea id="f-note" name="note">'+esc(old?.note||keep.note||'')+'</textarea></div></details>'
- +(task?'<p class="notice">配對到 '+esc(slash(task.date))+' 以 '+fmt(task.price)+' 賣出的買回計畫，還有 '+fmt(task.qty)+' 股待買回。</p>':'')
+ +'<details class="details"><summary>手續費、交易稅、分類與備註</summary><div class="form-pair"><div class="form-field"><label for="f-fee">手續費</label><input id="f-fee" name="fee" type="number" inputmode="numeric" min="0" step="0.01" value="'+esc(old?.fee??keep.fee??'')+'" placeholder="依帳本費率估算"></div><div class="form-field"><label for="f-tax">交易稅</label><input id="f-tax" name="tax" type="number" inputmode="numeric" min="0" step="0.01" value="'+esc(old?.tax??keep.tax??'')+'" placeholder="依帳本費率估算"></div></div><p class="hint">留白使用帳本的券商費率；填寫時採用實際金額。</p><div class="form-field"><label for="f-category">策略分類</label><select id="f-category" name="category">'+(buyBack?['REBUY']:cats).map(v=>'<option value="'+esc(v)+'" '+(cat===v?'selected':'')+'>'+esc(categoryName(v))+'</option>').join('')+'</select></div><div class="form-field"><label for="f-note">備註</label><textarea id="f-note" name="note">'+esc(old?.note||keep.note||'')+'</textarea></div></details>'
  +(cyc?'<p class="notice">回補 '+esc(slash(cyc.date))+' 以 '+fmt(cyc.price)+' 借券賣出的 '+fmt(cyc.qty)+' 股，'+(old?'這筆回補 '+fmt(old.qty)+' 股，':'')+'目前還有 '+fmt(cyc.remaining)+' 股待回補。</p>':'')
  +(old?.borrow?'<p class="hint">借券交易的帳戶與股票不能更改；股數、日期與借出來源會依 A 版規則重新檢查。</p>':'')
  +(old&&(old.linked||old.aligned)?'<p class="hint">這筆交易已被配對或對帳。修改金額或股數會重新計算配對、買回與損益'+(old.aligned?'，已採用的券商金額需重新確認':'')+'。</p>':'')
@@ -170,11 +179,12 @@ function updateEstimate(rebuild=false){const f=$('#trade-form');if(!f)return;con
   let left=Number(d.qty);f.querySelectorAll('.lot').forEach(l=>{const x=l.querySelector('input'),n=Number(x.dataset.shares),use=x.checked?Math.max(0,Math.min(n,left)):0;if(x.checked)left-=use;l.querySelector('em').textContent=x.checked?fmt(use)+' 股':'';});}
  else $('#availability').textContent='此帳戶現金 '+money(state.cash[d.account]||0);}
 // What the user already typed, carried over when the form is rebuilt (type switch, sell account change).
-function formSnapshot(f){const e=f.elements;return {account:e.account.value,code:e.code.value,date:e.date.value,time:e.time.value,price:e.price.value,qty:e.qty.value,fee:e.fee.value,tax:e.tax.value,category:e.category.value,note:e.note.value,borrow:e.borrow.value};}
+function formSnapshot(f){const e=f.elements;return {account:e.account.value,code:e.code.value,date:e.date.value,time:e.time.value,price:e.price.value,qty:e.qty.value,fee:e.fee.value,tax:e.tax.value,category:e.category.value,note:e.note.value,borrow:e.borrow.value,buyKind:e.buyKind.value};}
 function autoPickLots(f){let left=Number(f.elements.qty.value)||0;f.querySelectorAll('[name="source"]').forEach(x=>{x.checked=left>0;if(x.checked)left-=Number(x.dataset.shares);});}
 
 function financialEdit(f){const old=state.trades.find(t=>t.id===f.dataset.editId);if(!old)return false;const d=formFields();return d.date!==old.date||d.account!==old.account||d.code!==old.code||Number(d.qty)!==old.qty||Number(d.price)!==old.price||Number(d.fee)!==old.fee||Number(d.tax)!==old.tax||(old.type==='sell'&&d.sources!==(old.borrow==='BORROW_SELL'?old.borrowSources:old.sources));}
 function submitTrade(f){if(!f.reportValidity())return;
+ const kind=f.elements.buyKind.value;if((kind==='rebuy'&&!pickedIds(f,'rebuyPick'))||(kind==='cycle'&&!pickedIds(f,'cyclePick'))){f.querySelector('#form-error').innerHTML='<div class="error">'+(kind==='rebuy'?'請勾選要回補哪幾筆買回計畫，或改選一般買進。':'請選擇要回補哪一筆借券，或改選一般買進。')+'</div>';f.querySelector('#form-error').scrollIntoView({block:'nearest'});return;}
  // Like A's double confirmation: a second tap is needed before amounts on a matched trade are recomputed.
  if(f.dataset.linked&&f.dataset.confirmed!=='1'&&financialEdit(f)){f.dataset.confirmed='1';f.querySelector('#form-error').innerHTML='<div class="alert">修改這筆已配對的交易會重新計算庫存配對、買回與損益。確認無誤請再按一次「確認修改」。</div>';f.querySelector('[type="submit"]').textContent='確認修改';f.querySelector('#form-error').scrollIntoView({block:'nearest'});return;}
  const b=f.querySelector('[type="submit"]'),who=client.user?.uid;const label=b.textContent;b.disabled=true;b.textContent='正在儲存…';f.querySelector('#form-error').innerHTML='';client.commit({kind:'upsertTransaction',id:f.dataset.editId,fields:formFields()}).then(next=>{if(client.user?.uid!==who)return;setState(next);if(f.isConnected)closeSheet(false);render();toast('已儲存到共用帳本');}).catch(e=>{const box=f.querySelector('#form-error');if(f.isConnected&&box){box.innerHTML='<div class="error">'+esc(errorText(e))+'</div>';box.scrollIntoView({block:'nearest'});}else toast(errorText(e));}).finally(()=>{if(b.isConnected){b.disabled=false;b.textContent=label;}});}
@@ -445,7 +455,8 @@ async function submitNativePassword(form){
 
 
 
-function formFields(){const f=$('#trade-form'),fields=Object.fromEntries(new FormData(f));fields.id=f.dataset.editId;const costs=client.costs(fields);fields.fee=fields.fee===''?costs.fee:Number(fields.fee);fields.tax=fields.tax===''?costs.tax:Number(fields.tax);fields.sources=Array.from(f.querySelectorAll('[name="source"]:checked')).map(x=>x.value).join(',');return fields;}
+function formFields(){const f=$('#trade-form'),fields=Object.fromEntries(new FormData(f));fields.id=f.dataset.editId;const costs=client.costs(fields);fields.fee=fields.fee===''?costs.fee:Number(fields.fee);fields.tax=fields.tax===''?costs.tax:Number(fields.tax);fields.sources=Array.from(f.querySelectorAll('[name="source"]:checked')).map(x=>x.value).join(',');fields.rebuyIds=fields.buyKind==='rebuy'?pickedIds(f,'rebuyPick'):'';fields.cycle=fields.buyKind==='cycle'?pickedIds(f,'cyclePick'):'';delete fields.rebuyPick;delete fields.cyclePick;delete fields.buyKind;return fields;}
+function pickedIds(f,name){return Array.from(f.querySelectorAll('[name="'+name+'"]:checked')).map(x=>x.value).join(',');}
 
 function reload(){loading=true;authError='';if(!state)render();return client.reload().then(next=>{setState(next);closeSheet(false);render();toast('已載入最新雲端帳本');}).finally(()=>{loading=false;});}
 
@@ -463,6 +474,8 @@ async function click(b){
  if(b.dataset.trade)return tradeDetail(b.dataset.trade);
  if(b.dataset.new)return form(b.dataset.new,b.dataset.code||'','',{borrow:b.dataset.borrow||''});
  if(b.dataset.formType)return form(b.dataset.formType,'','',{...formSnapshot($('#trade-form')),fee:'',tax:''});
+ if(b.dataset.buyKind)return form('buy','','',{...formSnapshot($('#trade-form')),buyKind:b.dataset.buyKind,qty:'',price:'',fee:'',tax:''});
+ if(b.hasAttribute('data-sell-kind'))return form('sell','','',{...formSnapshot($('#trade-form')),borrow:b.dataset.sellKind,fee:'',tax:''});
  if(b.dataset.period){period=b.dataset.period;return render();}
  if(b.dataset.type){tradeType=b.dataset.type;return renderTradeResults();}
  if(b.dataset.reconTab){reconTab=b.dataset.reconTab;return render();}
@@ -547,7 +560,9 @@ document.addEventListener('input',e=>{if(e.target.id==='trade-search'){if(compos
 document.addEventListener('change',e=>{if(e.target.id==='c-account')updateCashHint();if(e.target.id==='k-account')updateCalibratePreview();if(e.target.id==='restore-ok'){const r=$('[data-confirm-restore]');if(r)r.disabled=!e.target.checked;return;}if(e.target.id==='restore-file'&&e.target.files[0])return chooseRestore(e.target.files[0]).catch(error=>toast('無法還原：'+errorText(error)));if(e.target.id==='fe-broker')return feesSheet(e.target.value);
  const x=e.target.closest('#exchange-form');if(x){if(e.target.id==='x-source')return exchangeSheet(x.dataset.code,exchangeFields(x));return updateExchangePreview();}
  const f=e.target.closest('#trade-form');if(!f)return;
- if(e.target.id==='f-borrow')return form('sell','','',{...formSnapshot(f),borrow:e.target.checked?'sell':'',fee:'',tax:''});
+ // Picking buy-back targets refills the shares; account or stock changes reload the targets.
+ if(['rebuyPick','cyclePick'].includes(e.target.name))return form('buy','','',{...formSnapshot(f),rebuyIds:pickedIds(f,'rebuyPick'),cycle:pickedIds(f,'cyclePick'),qty:''});
+ if(['f-account','f-stock'].includes(e.target.id)&&['rebuy','cycle'].includes(f.elements.buyKind.value))return form('buy',e.target.id==='f-stock'?e.target.value:'','',{...formSnapshot(f),qty:'',price:''});
  if(e.target.name==='source')f.dataset.lotsTouched='1';
  if(e.target.id==='f-account'&&f.elements.type.value==='sell'&&!f.dataset.editId)return form('sell','','',{...formSnapshot(f),account:e.target.value});
  if(e.target.id==='f-stock'){const q=stocks[e.target.value]?.price;if(q!=null&&!f.dataset.editId)f.elements.price.value=q;f.dataset.lotsTouched=f.dataset.editId?'1':'';}
