@@ -76,20 +76,20 @@ test('Compression round-trip keeps full legacy state',async()=>assert.deepEqual(
 test('Cloud load has zero writes; inline legacy state upgrades atomically',async()=>{
  const raw=fixture(),docs=new Map([[head,{state:raw,ownerUid:who.uid,ownerEmail:who.email,updatedAt:'old',customMetadata:42}]]),m=mockSdk(docs);
  const c=await createLedgerClient({}, {sdk:m.sdk});await c.reload();assert.equal(m.writes,0);
- await c.commit({kind:'upsertTransaction',fields:fields()});
+ await c.commit({kind:'upsertTransaction',fields:fields()},{wait:true});
  assert.equal(docs.get(head).customMetadata,42);assert.equal(docs.get(head).state,undefined);
  const saved=await decodeLedger(docs.get(head+'/chunks/chunk_0').data);assert.deepEqual(saved.extraUnknown,raw.extraUnknown);assert.equal(saved.appTransactions.at(-1).tradeTime,'10:30');
 });
 test('Cloud refuses stale main document without writing any chunks',async()=>{
  const docs=new Map([[head,{state:fixture(),ownerUid:who.uid,ownerEmail:who.email,updatedAt:'old'}]]),m=mockSdk(docs),c=await createLedgerClient({}, {sdk:m.sdk});await c.reload();
  docs.get(head).updatedAt='new-from-A';
- await assert.rejects(c.commit({kind:'upsertTransaction',fields:fields()}),{code:'stockbook/conflict'});
+ await assert.rejects(c.commit({kind:'upsertTransaction',fields:fields()},{wait:true}),{code:'stockbook/conflict'});
  assert.equal(m.writes,0);assert.equal(docs.size,1);
 });
 test('Cloud refuses changed chunks even when head metadata stayed identical',async()=>{
  const payload=await compressLedger(fixture()),docs=new Map([[head,{chunkCount:1,ownerUid:who.uid,ownerEmail:who.email,updatedAt:'old'}],[head+'/chunks/chunk_0',{data:payload,index:0,ownerUid:who.uid}]]),m=mockSdk(docs),c=await createLedgerClient({}, {sdk:m.sdk});
  await c.reload();docs.get(head+'/chunks/chunk_0').data=payload+'changed';
- await assert.rejects(c.commit({kind:'upsertTransaction',fields:fields()}),{code:'stockbook/conflict'});assert.equal(m.writes,0);
+ await assert.rejects(c.commit({kind:'upsertTransaction',fields:fields()},{wait:true}),{code:'stockbook/conflict'});assert.equal(m.writes,0);
 });
 test('Missing ledger, missing chunk and unverified identity never create documents',async()=>{
  for(const docs of [new Map(),new Map([[head,{chunkCount:1,updatedAt:'old'}]])]){
@@ -99,7 +99,7 @@ test('Missing ledger, missing chunk and unverified identity never create documen
 });
 test('Successive cloud writes use new baseline and preserve unrelated accounts',async()=>{
  const docs=new Map([[head,{state:fixture(),ownerUid:who.uid,ownerEmail:who.email,updatedAt:'old'}]]),m=mockSdk(docs),c=await createLedgerClient({}, {sdk:m.sdk});
- await c.reload();await c.commit({kind:'upsertTransaction',fields:fields()});await c.commit({kind:'upsertTransaction',fields:fields({time:'10:31'})});
+ await c.reload();await c.commit({kind:'upsertTransaction',fields:fields()},{wait:true});await c.commit({kind:'upsertTransaction',fields:fields({time:'10:31'})},{wait:true});
  const saved=await decodeLedger(docs.get(head+'/chunks/chunk_0').data);assert.equal(saved.appTransactions.length,fixture().appTransactions.length+2);
  assert.deepEqual(saved.appTransactions.filter(t=>t.brokerAccountId==='review-b'),fixture().appTransactions.filter(t=>t.brokerAccountId==='review-b'));
 });
@@ -120,7 +120,7 @@ test('Reconciliation acceptance uses legacy acceptance key and changes effective
 test('Signout during compression cancels pending save before writing',async()=>{
  const docs=new Map([[head,{state:fixture(),ownerUid:who.uid,ownerEmail:who.email,updatedAt:'old'}]]),m=mockSdk(docs),c=await createLedgerClient({}, {sdk:m.sdk});
  await c.reload();
- const rejected=assert.rejects(c.commit({kind:'upsertTransaction',fields:fields()}),/登入狀態/);
+ const rejected=assert.rejects(c.commit({kind:'upsertTransaction',fields:fields()},{wait:true}),/登入狀態/);
  await c.signOut();await rejected;assert.equal(m.writes,0);assert.equal(c.view(),null);
 });
 
@@ -131,7 +131,7 @@ test('Signout while transaction reads are pending cancels before any mutations',
  const paused=new Promise(resolve=>{reached=resolve;});
  const gate=new Promise(resolve=>{release=resolve;});
  m.sdk[2].runTransaction=async(db,fn)=>run(db,tx=>fn({...tx,get:async ref=>{const result=await tx.get(ref);if(ref===head){reached();await gate;}return result;}}));
- const rejected=assert.rejects(c.commit({kind:'upsertTransaction',fields:fields()}),/登入狀態/);
+ const rejected=assert.rejects(c.commit({kind:'upsertTransaction',fields:fields()},{wait:true}),/登入狀態/);
  await paused;await c.signOut();release();await rejected;assert.equal(m.writes,0);
 });
 
@@ -401,7 +401,7 @@ test('First use: B creates a new ledger only where none exists',async()=>{
  const model=await c.createLedger({portfolioName:'我的帳本',brokerId:'broker-cathay',accountName:'主帳戶'});
  assert.equal(calls[0].url,'https://firestore.googleapis.com/v1/projects/demo-p/databases/(default)/documents:commit');assert.equal(calls[0].auth,'Bearer id-token');
  assert.equal(model.portfolios[0].name,'我的帳本');assert.equal(docs.get(head).ownerUid,who.uid);assert.equal(docs.get(head).ownerEmail,who.email);assert.equal(docs.get(head).chunkCount,1);
- const acct=model.accounts.find(a=>a.id!=='all').id,after=await c.commit({kind:'upsertCash',fields:{cashType:'DEPOSIT',account:acct,date:taipeiToday(),amount:5000}});
+ const acct=model.accounts.find(a=>a.id!=='all').id,after=await c.commit({kind:'upsertCash',fields:{cashType:'DEPOSIT',account:acct,date:taipeiToday(),amount:5000}},{wait:true});
  assert.equal(after.cash[acct],5000);
  const saved=JSON.stringify(docs.get(head));
  await assert.rejects(c.createLedger({}),{code:'stockbook/exists'});assert.equal(JSON.stringify(docs.get(head)),saved,'a second create never overwrites');
@@ -600,4 +600,33 @@ test('One order filled twice: a later export with fees split differently is caug
  // A later batch holding more equal fills than an earlier one keeps the extra one.
  const more=structuredClone(legacy);more.brokerExecutions.push({...sells(later2)[1],id:'third',createdAt:'2099-01-01T00:00:01Z'});
  assert.equal(projectLedger(more,who,pid).reconciliation.flatMap(l=>l.duplicates).length,2);
+});
+
+test('Save is shown at once and written to the cloud in the background',async()=>{
+ const docs=new Map([[head,{state:fixture(),ownerUid:who.uid,ownerEmail:who.email,updatedAt:'old'}]]),m=mockSdk(docs),events=[];
+ const c=await createLedgerClient({}, {sdk:m.sdk,onSyncChange:e=>events.push(e)});await c.reload();
+ const before=c.view().trades.length,next=await c.commit({kind:'upsertTransaction',fields:fields()});
+ assert.equal(next.trades.length,before+1);assert.equal(m.writes,0,'returns before the cloud write');assert.equal(c.syncing,true);
+ await c.idle();
+ assert.ok(m.writes>0);assert.equal(c.syncing,false);assert.equal(events.at(-1).pending,false);assert.equal(events.some(e=>e.error),false);
+ const saved=await decodeLedger(docs.get(head+'/chunks/chunk_0').data);assert.equal(saved.appTransactions.length,fixture().appTransactions.length+1);
+});
+test('Saves made while one is syncing are merged into the next write',async()=>{
+ const docs=new Map([[head,{state:fixture(),ownerUid:who.uid,ownerEmail:who.email,updatedAt:'old'}]]),m=mockSdk(docs);
+ const run=m.sdk[2].runTransaction;let transactions=0;m.sdk[2].runTransaction=async(db,fn)=>{transactions++;return run(db,fn);};
+ const c=await createLedgerClient({}, {sdk:m.sdk});await c.reload();transactions=0;
+ await Promise.all(['10:31','10:32','10:33'].map(time=>c.commit({kind:'upsertTransaction',fields:fields({time})})));
+ await c.idle();
+ assert.ok(transactions<=2,'three quick saves need at most two writes');
+ const saved=await decodeLedger(docs.get(head+'/chunks/chunk_0').data);assert.equal(saved.appTransactions.length,fixture().appTransactions.length+3);
+});
+test('A background save that hits a newer cloud version is reported and the screen goes back to the cloud',async()=>{
+ const docs=new Map([[head,{state:fixture(),ownerUid:who.uid,ownerEmail:who.email,updatedAt:'old'}]]),m=mockSdk(docs),events=[];
+ const c=await createLedgerClient({}, {sdk:m.sdk,onSyncChange:e=>events.push(e)});await c.reload();
+ const before=c.view().trades.length;docs.get(head).updatedAt='new-from-A';
+ const shown=await c.commit({kind:'upsertTransaction',fields:fields()});assert.equal(shown.trades.length,before+1);
+ await c.idle();
+ const failed=events.find(e=>e.error);assert.equal(failed.error.code,'stockbook/conflict');assert.equal(failed.lost,1);
+ assert.equal(m.writes,0,'nothing written over the newer version');
+ assert.equal(c.view().trades.length,before,'unsaved trade is no longer shown');assert.equal(c.view().updatedAt,'new-from-A','newest cloud version was reloaded');
 });
