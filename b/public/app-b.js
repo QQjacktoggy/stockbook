@@ -143,7 +143,8 @@ function form(type='buy',code='',id='',keep={}){
  const held=heldCodes(acc),codes=lockPlace?[old.code]:sell&&!old&&held.length?held:poolCodes.length?poolCodes:Object.keys(stocks);
  const symbol=old?.code||(codes.includes(code)?code:'')||(codes.includes(from?.code)?from.code:'')||(codes.includes(keep.code)?keep.code:'')||codes[0];
  if(old&&!accounts.some(a=>a.id===acc))return toast('這筆交易的帳戶已停用，請在 A 版處理。');
- const picks=pool.filter(x=>x.code===symbol),want=kind==='rebuy'?String(keep.rebuyIds||'').split(',').filter(Boolean):[keep.cycle].filter(Boolean);
+ // Highest price first, like A's sortByRebuyTargetDesc; same price, newest sell first.
+ const picks=pool.filter(x=>x.code===symbol).sort((x,y)=>(kind==='rebuy'?y.target-x.target:y.price-x.price)||String(y.date).localeCompare(String(x.date))),want=kind==='rebuy'?String(keep.rebuyIds||'').split(',').filter(Boolean):[keep.cycle].filter(Boolean);
  let chosen=picks.filter(x=>want.includes(x.id));if(!chosen.length&&picks.length===1&&!Object.hasOwn(keep,'rebuyIds')&&!Object.hasOwn(keep,'cycle'))chosen=picks.slice();
  const pickQty=chosen.reduce((s,x)=>s+(kind==='cycle'?x.remaining:x.qty),0),buyBack=kind==='rebuy'||!!old?.rebuyIds;
  const cat=buyBack?'REBUY':old?.category||keep.category||'LONG_TERM',cats=Object.keys(CATEGORY_NAMES).concat(Object.hasOwn(CATEGORY_NAMES,cat)?[]:[cat]);
