@@ -1,11 +1,25 @@
-import {mobileExecutionChecksum, evaluateLedger, mobileInventory, mobileAmounts, mobileBasis, mobileSellOptions, mobileCosts, acceptanceKey, mobileNormalizeTransaction, mobileSettings, mobileBorrowOptions, mobileValidateBorrow, mobileExchangeLots, mobileExchangeEligible, mobileExchangePlan, mobileAssetType, mobileImport, mobileClearAcceptedDiffs, mobileReport, mobileReportPdfHtml, mobileReportXls, mobileRestore, mobileContentCount } from './legacy-engine.js';
+import {mobileExecutionChecksum, evaluateLedger, mobileCloneLedger, mobileInventory, mobileAmounts, mobileBasis, mobileSellOptions, mobileCosts, acceptanceKey, mobileNormalizeTransaction, mobileSettings, mobileBorrowOptions, mobileValidateBorrow, mobileExchangeLots, mobileExchangeEligible, mobileExchangePlan, mobileAssetType, mobileImport, mobileClearAcceptedDiffs, mobileReport, mobileReportPdfHtml, mobileReportXls, mobileRestore, mobileContentCount } from './legacy-engine.js';
 import { DEFAULT_FOLDER_ID } from './drive-import.js';
-export function taipeiToday(now=new Date()){return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(now);}
+// One formatter for the whole session: building an Intl formatter is slow on phones and this runs on every check.
+const taipeiDate=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'});
+export function taipeiToday(now=new Date()){return taipeiDate.format(now);}
 function num(v){return Number(v)||0;}
+// Evaluating a ledger (copy + recompute everything) is the costly step, and the same ledger object is evaluated by the form,
+// the save check and the screen. Results are kept per ledger object (raw ledgers are replaced, never edited in place)
+// and treated as read-only; the tests freeze them to prove nothing writes to a shared result.
+const evaluations=new WeakMap();
+function evaluate(raw,identity,portfolioId=''){
+ let byKey=evaluations.get(raw);if(!byKey)evaluations.set(raw,byKey=new Map());
+ const key=identity.uid+'\n'+identity.email+'\n'+portfolioId;
+ if(!byKey.has(key)){const result=evaluateLedger(raw,identity,portfolioId);if(globalThis.__stockbookFreezeEvaluations)deepFreeze(result);byKey.set(key,result);}
+ return byKey.get(key);
+}
+// settings.portfolios is skipped: the legacy engine fills in default settings there the first time they are read (same values every time).
+function deepFreeze(value){const stack=[value];while(stack.length){const v=stack.pop();if(v&&typeof v==='object'&&!Object.isFrozen(v)){if(v===value.data?.settings?.portfolios)continue;Object.freeze(v);for(const k of Object.keys(v))stack.push(v[k]);}}return value;}
 const clone=x=>structuredClone(x);
 function scoped(data,portfolioId,key){return (data[key]||[]).filter(x=>x.portfolioId===portfolioId);}
 export function projectLedger(raw,identity,portfolioId='',account='all'){
- const evaluated=evaluateLedger(raw,identity,portfolioId),{data,user}=evaluated,pid=evaluated.portfolioId;
+ const evaluated=evaluate(raw,identity,portfolioId),{data,user}=evaluated,pid=evaluated.portfolioId;
  const stocks={};
  for(const sec of data.securities){const quote=data.marketQuotes.filter(q=>q.portfolioId===pid&&q.securityId===sec.id).sort((a,b)=>String(b.quoteTime||'').localeCompare(String(a.quoteTime||'')))[0];stocks[sec.id]={symbol:sec.symbol,name:sec.name||sec.symbol,price:num(quote?.price)>0?num(quote.price):null,quoteTime:quote?.quoteTime||'',quoteSource:quote?.source||'',assetType:sec.assetType,market:sec.market||'TW',yahooSymbol:sec.yahooSymbol||''};}
  const accounts=[{id:'all',name:'全部帳戶',full:'所有券商帳戶'},...scoped(data,pid,'brokerAccounts').filter(a=>a.isActive!==false).map(a=>{const broker=data.brokers.find(b=>b.id===a.brokerId);return {id:a.id,name:a.accountName||a.name||broker?.name||a.accountNo||a.id,full:(broker?.name||'券商')+' · '+(a.accountName||a.name||a.accountNo||'帳戶'),brokerId:a.brokerId};})];
@@ -44,23 +58,23 @@ export const CATEGORIES=['LONG_TERM','TRADING','CORE','REBUY'];
 // Like A's quick sell: when no lots are chosen, take just enough lots in the offered (high price first) order.
 export function minimalLots(options,qty){const out=[];let left=num(qty);for(const o of options){if(left<=0)break;out.push(o);left-=num(o.shares);}return out;}
 export function estimateCosts(raw,identity,portfolioId,fields){
- const {data}=evaluateLedger(raw,identity,portfolioId),account=data.brokerAccounts.find(a=>a.id===fields.account),security=data.securities.find(s=>s.id===fields.code);
+ const {data}=evaluate(raw,identity,portfolioId),account=data.brokerAccounts.find(a=>a.id===fields.account),security=data.securities.find(s=>s.id===fields.code);
  return mobileCosts(data,fields.type==='sell'?'SELL':'BUY',num(fields.price),num(fields.qty),account?.brokerId,security);
 }
 export function sellOptions(raw,identity,portfolioId,fields){
- const {data}=evaluateLedger(raw,identity,portfolioId),sec=data.securities.find(s=>s.id===fields.code);
+ const {data}=evaluate(raw,identity,portfolioId),sec=data.securities.find(s=>s.id===fields.code);
  if(!sec)return [];
  return mobileSellOptions(data,fields.account,sec.symbol,fields.date,fields.id||'');
 }
 export function borrowOptions(raw,identity,portfolioId,fields){
- const {data}=evaluateLedger(raw,identity,portfolioId),sec=data.securities.find(s=>s.id===fields.code);
+ const {data}=evaluate(raw,identity,portfolioId),sec=data.securities.find(s=>s.id===fields.code);
  if(!sec)return [];
  const old=fields.id?data.appTransactions.find(t=>t.id===fields.id):null;
  return mobileBorrowOptions(data,fields.account,sec.symbol,fields.date,fields.id||'',old?.sourceInventoryLotId||'');
 }
 // Preview of A's cost exchange plan for the form; throws the same messages A shows.
 export function exchangePreview(raw,identity,portfolioId,fields){
- const {data,portfolioId:pid}=evaluateLedger(raw,identity,portfolioId);
+ const {data,portfolioId:pid}=evaluate(raw,identity,portfolioId);
  return exchangePlan(data,pid,fields).plan;
 }
 function exchangePlan(data,pid,f){
@@ -86,7 +100,7 @@ export function starterLedger(identity,{portfolioName='',brokerId='broker-cathay
   settings:{user:{timezone:'Asia/Taipei',baseCurrency:'TWD',dateFormat:'YYYY-MM-DD'},portfolios:{[pid]:mobileSettings({settings:{portfolios:{}}},'')}},
   acceptedBrokerDiffs:{},manualClosedRebuySellIds:[]
  };
- evaluateLedger(raw,identity,pid);
+ evaluate(raw,identity,pid);
  return raw;
 }
 function canWrite(data,user,pid){
@@ -110,7 +124,7 @@ function validateDate(date){
 const CASH_TYPES=['DEPOSIT','WITHDRAW','DIVIDEND','INTEREST'];
 const BENCHMARK_KEYS=['benchmarkSecurityId','benchmarkSymbol','benchmarkPrice','benchmarkPriceSource','benchmarkPriceDate','benchmarkPriceCapturedAt'];
 function activeAccount(data,pid,id){return data.brokerAccounts.find(a=>a.id===id&&a.portfolioId===pid&&a.isActive!==false);}
-function evaluatedPortfolios(raw,identity){return evaluateLedger(raw,identity,'').portfolios.map(p=>p.id);}
+function evaluatedPortfolios(raw,identity){return evaluate(raw,identity,'').portfolios.map(p=>p.id);}
 function accountCash(data,pid,accountId){return data.cashLedger.filter(r=>r.portfolioId===pid&&r.brokerAccountId===accountId).reduce((s,r)=>s+num(r.amount),0);}
 function ownNet(data,id){const t=data.appTransactions.find(x=>x.id===id);return t?num(mobileAmounts(data,t).netAmount):0;}
 function activeTask(task){return task&&!['CLOSED','MANUAL_CLOSED'].includes(task.status)&&num(task.remainingRebuyShares)>0;}
@@ -125,7 +139,7 @@ export function reportPdf(raw,identity,portfolioId,account='all'){return mobileR
 export function reportXls(raw,identity,portfolioId,account='all'){return mobileReportXls(raw,identity,portfolioId,account==='all'?'ALL':account);}
 // Deposits and withdrawals still missing a 0050 benchmark price (A fills these before every report export).
 export function missingBenchmarks(raw,identity,portfolioId,account='all'){
- const {data,portfolioId:pid}=evaluateLedger(raw,identity,portfolioId);
+ const {data,portfolioId:pid}=evaluate(raw,identity,portfolioId);
  return data.appTransactions.filter(t=>t.portfolioId===pid&&['DEPOSIT','WITHDRAW'].includes(t.transactionType)&&(account==='all'||t.brokerAccountId===account)&&!(num(t.benchmarkPrice)>0)).map(t=>({id:t.id,date:t.tradeDate}));
 }
 export function contentCount(data){return mobileContentCount(data);}
@@ -143,9 +157,9 @@ function duplicateExecutions(data,pid){
  return extras;
 }
 export function buildOperation(raw,identity,portfolioId,op){
- const {data,user,portfolioId:pid}=evaluateLedger(raw,identity,portfolioId);
+ const {data,user,portfolioId:pid}=evaluate(raw,identity,portfolioId);
  if(!canWrite(data,user,pid))throw new Error('這份投資帳本沒有編輯權限。');
- const next=clone(raw),now=new Date().toISOString();next.appTransactions=next.appTransactions||[];
+ const next=mobileCloneLedger(raw),now=new Date().toISOString();next.appTransactions=next.appTransactions||[];
  let before=null,after=null,entityId='',action='',entityType='transaction';
  if(op.kind==='acceptReconciliation'){
   // One key (檢查 → 採用) or several (A's 採用券商金額 for every pending fee/amount difference).
@@ -322,7 +336,7 @@ export function buildOperation(raw,identity,portfolioId,op){
   const txIds=new Set(next.appTransactions.filter(t=>t.importBatchId===batch.id||(batch.sourceType==='JSON_LEDGER'&&t.sourceType==='JSON_IMPORT'&&jsonIds.has(t.sourceTransactionId||''))).map(t=>t.id));
   const outside=next.appTransactions.find(t=>!txIds.has(t.id)&&['linkedBuyTransactionId','sourceInventoryLotId','rebuySellTransactionIds','rebuyCycleId'].some(k=>String(t[k]||'').split(/[,\s]+/).some(id=>txIds.has(id))));
   if(outside)throw new Error('這批匯入的交易被 '+outside.tradeDate+' 的其他交易引用，請先處理那筆交易。');
-  const accepted=mobileClearAcceptedDiffs(data,execIds,txIds);
+  const accepted=mobileClearAcceptedDiffs({...data},execIds,txIds);
   before={...clone(batch),acceptedBrokerDiffs:clone(next.acceptedBrokerDiffs||{})};
   next.acceptedBrokerDiffs=accepted;
   next.importBatches=next.importBatches.filter(b=>b.id!==batch.id);next.rawImportRows=(next.rawImportRows||[]).filter(r=>r.importBatchId!==batch.id);next.brokerExecutions=(next.brokerExecutions||[]).filter(x=>x.importBatchId!==batch.id);
@@ -335,7 +349,7 @@ export function buildOperation(raw,identity,portfolioId,op){
   if(ids.some(id=>!extras.has(id)))throw new Error('這些券商紀錄已改變，請重新載入。');
   const execIds=new Set(ids),removed=(next.brokerExecutions||[]).filter(x=>execIds.has(x.id));
   before={brokerExecutions:clone(removed),acceptedBrokerDiffs:clone(next.acceptedBrokerDiffs||{})};
-  next.acceptedBrokerDiffs=mobileClearAcceptedDiffs(data,execIds,new Set());
+  next.acceptedBrokerDiffs=mobileClearAcceptedDiffs({...data},execIds,new Set());
   // The kept copy gets today's checksum (as A's repairBrokerExecutionSecurityIds does), so importing the same CSV again is still caught as a duplicate.
   // It is computed from the loaded record, whose stock A has already repaired from the security name.
   const keep=new Set(ids.map(id=>extras.get(id))),loaded=new Map(data.brokerExecutions.map(x=>[x.id,x]));
@@ -523,15 +537,16 @@ export function buildOperation(raw,identity,portfolioId,op){
    const fmt=n=>n.toLocaleString('zh-TW',{maximumFractionDigits:2});
    const note=('餘額校準：券商實際 '+fmt(actual)+'，帳本原為 '+fmt(ledger)+(String(f.note||'').trim()?'。'+String(f.note).trim():'')).slice(0,4000);
    const out=buildOperation(raw,identity,portfolioId,{kind:'upsertCash',fields:{cashType:diff>0?'DEPOSIT':'WITHDRAW',account:account.id,date:taipeiToday(),amount:Math.abs(diff),note},benchmark:op.benchmark});
-   const tx=out.appTransactions.at(-1),log=out.auditLogs.at(-1);
-   tx.cashCalibration={actualBalance:actual,ledgerBalance:ledger,difference:diff};
-   log.action='CALIBRATE_CASH';log.after=tx;
+   // Replaced, not edited: the audit entry is shared with the evaluated copy (mobileCloneLedger).
+   const last=out.appTransactions.length-1,tx={...out.appTransactions[last],cashCalibration:{actualBalance:actual,ledgerBalance:ledger,difference:diff}};
+   out.appTransactions[last]=tx;out.auditLogs[out.auditLogs.length-1]={...out.auditLogs.at(-1),action:'CALIBRATE_CASH',after:tx};
+   evaluations.delete(out); // edited after it was evaluated
    return out;
   }else throw new Error('不支援的帳本操作。');
  }
  // Keep every legacy and unknown field; the B interface never exports its presentation model.
  next.auditLogs=[...(next.auditLogs||[]),{id:'audit-b-'+crypto.randomUUID(),userId:user.id,portfolioId:pid,action,entityType,entityId,before,after,createdAt:now,source:'MOBILE_B'}];
- const candidate=evaluateLedger(next,identity,pid).data;
+ const candidate=evaluate(next,identity,pid).data;
  // Editing amounts recomputes matching (as in A), but never leaves another sell without the inventory it had.
  const matched=(d,id)=>d.sellMatches.filter(m=>m.sellTransactionId===id).reduce((s,m)=>s+num(m.matchedShares),0);
  if(op.kind==='restoreBackup')return next;

@@ -138,8 +138,12 @@ function normalizeState(input) {
   return merged;
 }
 
+// Recomputing a ledger asks for the time thousands of times; reuse the string within the same millisecond.
+var nowIsoAt = 0, nowIsoText = ""; // var: nowIso runs while the module is still loading
 function nowIso() {
-  return new Date().toISOString();
+  const at = Date.now();
+  if (at !== nowIsoAt) { nowIsoAt = at; nowIsoText = new Date(at).toISOString(); }
+  return nowIsoText;
 }
 
 function makeId(prefix) {
@@ -3247,9 +3251,16 @@ function stripTags(value) {
   return String(value ?? "").replace(/<[^>]*>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&#096;/g, "`").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
 }
 
+// Audit logs are history only (no recompute or check reads or edits an old entry) and are the largest part of a long-used
+// ledger, so copies share the entries instead of deep-copying them; the array itself is still new.
+export function mobileCloneLedger(raw) {
+  const {auditLogs,...rest}=raw,copy=structuredClone(rest);
+  if (auditLogs!==undefined) copy.auditLogs=Array.isArray(auditLogs)?[...auditLogs]:structuredClone(auditLogs);
+  return copy;
+}
 export function evaluateLedger(raw, identity, portfolioId='') {
   if (!raw || !Array.isArray(raw.appTransactions)) throw new Error('帳本交易格式不正確，請先在 A 版同步。');
-  state=normalizeState(structuredClone(raw));
+  state=normalizeState(mobileCloneLedger(raw));
   const email=String(identity.email||'').toLowerCase();
   const owner=state.users.find(u=>u.firebaseUid===identity.uid)||state.users.find(u=>String(u.email||'').toLowerCase()===email);
   if (!owner) throw new Error('帳本使用者與 Google 登入帳號不符，請先在 A 版確認。');
