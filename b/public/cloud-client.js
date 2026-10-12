@@ -109,6 +109,8 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
   flushing=(async()=>{
    let failure=null,lost=0,ticket=epoch;
    while(queued&&!failure){
+    // Let the screen close the form and redraw first; packing the ledger for upload takes a moment on a phone.
+    await new Promise(resolve=>setTimeout(resolve,0));
     const job=queued;queued=null;lost=job.count;ticket=job.ticket;notify();
     try{await write(job);}catch(error){failure=error;lost+=queued?.count||0;queued=null;}
    }
@@ -185,7 +187,7 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
    finally{emailLoginPending=false;publishAuth(auth.currentUser);}
   },
   async signIn(redirect=false){const provider=new authModule.GoogleAuthProvider();provider.setCustomParameters({prompt:'select_account'});if(redirect)return authModule.signInWithRedirect(auth,provider);return authModule.signInWithPopup(auth,provider);},
-  async signOut(){epoch++;driveAccess=null;baseline=null;raw=null;confirmed=null;queued=null;model=null;return authModule.signOut(auth);},
+  async signOut(){epoch++;driveAccess=null;baseline=null;raw=null;confirmed=null;model=null;return authModule.signOut(auth);},
   reload,commit,createLedger,idle,
   view(){return model;},
   select(portfolioId,account='all'){if(!raw)throw new Error('請先載入帳本。');model=projectLedger(raw,identity(),portfolioId,account);model.updatedAt=baseline?.main.updatedAt||'';return model;},
@@ -208,7 +210,7 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
   driveDisconnect(){return callFunction('disconnectDrive');},
   get user(){return auth.currentUser;},get namespace(){return baseline?.ns||'';},get busy(){return busy;},get syncing(){return syncing();}
  };
- function publishAuth(user){epoch++;driveAccess=null;baseline=null;raw=null;confirmed=null;queued=null;model=null;onAuthChange(user,client);}
+ function publishAuth(user){epoch++;driveAccess=null;baseline=null;raw=null;confirmed=null;model=null;onAuthChange(user,client);}
  authModule.onAuthStateChanged(auth,user=>{if(!emailLoginPending)publishAuth(user);});
  try{nativeAuth.completeRedirectReauthentication(await authModule.getRedirectResult(auth));}catch(error){onAuthChange(auth.currentUser,client,error);}
  return client;

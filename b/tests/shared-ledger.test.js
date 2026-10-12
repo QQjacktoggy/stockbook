@@ -1,3 +1,4 @@
+globalThis.__stockbookFreezeEvaluations=true; // evaluated ledgers are shared (model.js evaluate); any write to one fails a test
 import test from 'node:test';
 // Core transaction and SDK boundary tests use synthetic fixtures only.
 import assert from 'node:assert/strict';
@@ -565,8 +566,9 @@ test('Flags a broker fill imported twice, shows the ledger amount, and removes o
  // Two equal fills inside one import batch can be real (one order filled twice), so they are never flagged.
  const same=structuredClone(raw);same.brokerExecutions[1].importBatchId='b1';assert.deepEqual(projectLedger(same,who,pid).reconciliation.flatMap(l=>l.duplicates),[]);
  // A different order number, or a fill without one, is never treated as a repeat.
- raw.brokerExecutions[1].orderNo='A2818';assert.deepEqual(projectLedger(raw,who,pid).reconciliation.flatMap(l=>l.duplicates),[]);
- raw.brokerExecutions.forEach(x=>x.orderNo='');assert.deepEqual(projectLedger(raw,who,pid).reconciliation.flatMap(l=>l.duplicates),[]);
+ // (Edited copies: a ledger object is never changed in place once evaluated, see model.js evaluate.)
+ const other=structuredClone(raw);other.brokerExecutions[1].orderNo='A2818';assert.deepEqual(projectLedger(other,who,pid).reconciliation.flatMap(l=>l.duplicates),[]);
+ const none=structuredClone(raw);none.brokerExecutions.forEach(x=>x.orderNo='');assert.deepEqual(projectLedger(none,who,pid).reconciliation.flatMap(l=>l.duplicates),[]);
  // Missing-in-app rows have no ledger amount; missing-in-broker rows have no broker amount.
  const miss=m.reconciliation.find(l=>l.matchStatus==='MISSING_IN_BROKER');if(miss){assert.equal(miss.brokerNetAmount,null);assert.equal(miss.appNetAmount,miss.allocatedNetAmount);}
 });
