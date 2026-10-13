@@ -61,5 +61,20 @@ service cloud.firestore {
         allow delete: if ownsParentAfter();
       }
     }
+
+    // Read-only quote-watcher account (Stockbook｜盯盤). Read only; no write/create/update/delete.
+    match /stockLedgers/{roLedgerId} {
+      function isQuoteWatcher() {
+        return request.auth != null
+          && request.auth.uid == 'Tl4GxgoyRCUYqIZzx0vthIF8Qjx1'
+          && request.auth.token.email == 'jacktoggy@mail.grokbot.com';
+      }
+
+      allow get: if roLedgerId == 'punktoggy_gmail.com' && isQuoteWatcher();
+
+      match /chunks/{roChunkId} {
+        allow read: if roLedgerId == 'punktoggy_gmail.com' && isQuoteWatcher();
+      }
+    }
   }
 }
