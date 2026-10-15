@@ -332,6 +332,17 @@ test('Rebuy: a B buy fills the plan like A, and plans can be closed manually',()
  assert.equal(closed.auditLogs.at(-1).action,'MANUAL_CLOSE');
  assert.throws(()=>buildOperation(closed,who,pid,{kind:'closeRebuy',sellIds:[task.id]}),/已改變/);
 });
+test('Rebuy: picks are deducted in the order chosen, and the shares need not match (A 依順位扣除)',()=>{
+ const base=fixture(),first=projectLedger(base,who,pid).rebuy.find(r=>r.id==='demo-sell-am');
+ const raw=buildOperation(base,who,pid,{kind:'upsertTransaction',fields:fields({type:'sell',code:first.code,qty:10,price:130})}),second=projectLedger(raw,who,pid).rebuy.find(r=>r.id===raw.appTransactions.at(-1).id);
+ assert.ok(second,'second plan is open');
+ const left=d=>Object.fromEntries(projectLedger(d,who,pid).rebuy.map(r=>[r.id,r.qty]));
+ const part=buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({code:first.code,rebuyIds:second.id+','+first.id,qty:second.qty+1,price:100})});
+ assert.equal(part.appTransactions.at(-1).rebuySellTransactionIds,second.id+','+first.id,'pick order is kept');
+ assert.equal(left(part)[second.id],undefined,'first pick is filled first');assert.equal(left(part)[first.id],first.qty-1,'the rest goes to the next pick');
+ const over=buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({code:first.code,rebuyIds:first.id,qty:first.qty+50,price:100})});
+ assert.equal(left(over)[first.id],undefined,'extra shares beyond the plan are allowed');assert.equal(over.appTransactions.at(-1).shares,first.qty+50);
+});
 test('Cash transfers move cash between accounts without counting as deposits (A 現金轉帳)',()=>{
  const raw=fixture(),cash=d=>projectLedger(d,who,pid).cash,before=cash(raw),f=o=>({from:'review-a',to:'review-b',date:taipeiToday(),amount:1000,fee:10,note:'轉帳',...o});
  assert.throws(()=>buildOperation(raw,who,pid,{kind:'upsertCashTransfer',fields:f({to:'review-a'})}),/不可相同/);
