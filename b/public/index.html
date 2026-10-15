@@ -171,6 +171,10 @@ button.lot{font:inherit;color:inherit;cursor:pointer}button.lot svg{width:18px;h
 .recon-grid .qty{font-size:20px;margin-top:2px}.recon-grid .px{font-size:17px}.recon-grid small+small{margin-top:4px}
 .sheet .recon-grid{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 15px;margin:0 0 14px}
 .lot b.qp{font-size:17px;font-weight:700;display:block}
+.lot .rank{font-style:normal;font-weight:700;font-size:13px;min-width:22px;height:22px;border-radius:11px;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;background:var(--line);color:var(--muted)}
+.lot .rank:empty{display:none}
+.lot.picked .rank{background:var(--up);color:#fff}
+.buy-picks .lot.picked{border-color:var(--up)}
 .recon-rows b.qp{font-size:15px;color:var(--ink)}
 .big-detail.qp-big{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:32px;letter-spacing:-.3px}
 .big-detail.qp-big i{font-style:normal;font-family:-apple-system,BlinkMacSystemFont,"Noto Sans CJK TC","Microsoft JhengHei",sans-serif;font-size:15px;font-weight:500;color:var(--muted);margin:0 4px}
