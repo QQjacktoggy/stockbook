@@ -515,10 +515,7 @@ export function buildOperation(raw,identity,portfolioId,op){
     sources=chosen.map(l=>l.value).join(',');
    }
    if(type==='SELL'&&qty*price<fee+tax)throw new Error('費用不能高於賣出成交金額。');
-   if(type==='BUY'&&(!old||financialChanged)){
-    const restored=old&&old.brokerAccountId===account.id?-ownNet(data,old.id):0;
-    if(qty*price+fee+tax>accountCash(data,pid,account.id)+restored)throw new Error('帳上現金不足，請先記錄入金或調整金額。');
-   }
+   // A buy may leave the account's cash negative (bought first, sold or deposited later the same day), as A allows.
    const category=rebuyList.length?'REBUY':CATEGORIES.includes(f.category)?f.category:(old?.strategyCategory||'LONG_TERM');
    entityId=old?.id||'tx-b-'+crypto.randomUUID();
    after={...(old||{sourceType:'MANUAL'}),borrowRebuyType:borrow,sourceInventoryLotId:borrow==='BORROW_SELL'?borrowSources:'',rebuyCycleId:borrow==='REBUY_FILL'?cycleId:'',id:entityId,userId:user.id,portfolioId:pid,brokerId:account.brokerId,brokerAccountId:account.id,securityId:security.id,transactionType:type,tradeDate:f.date,tradeTime:f.time||'',price,shares:qty,fee,tax,strategyCategory:category,linkedBuyTransactionId:type==='SELL'?(borrow?'':sources):(old?.linkedBuyTransactionId||''),rebuySellTransactionIds:type==='BUY'?rebuyList.join(','):'',buyIntent:type==='BUY'?(rebuyList.length?'REBUY':(old?.buyIntent||'NEW')):'',note:String(f.note||'').slice(0,4000),createdAt:old?.createdAt||now,updatedAt:now};
@@ -560,7 +557,9 @@ export function buildOperation(raw,identity,portfolioId,op){
   if(now2&&lendable(data,tx)&&!lendable(candidate,now2))throw new Error('修改後，'+tx.tradeDate+' 的借券賣出會借不到足夠庫存。請先調整那筆借券，或改回原本的股數。');
  }
  // No account may end with less than zero cash because of this change (an existing shortfall may stay, but not grow).
- if(op.kind!=='importFile')for(const a of data.brokerAccounts.filter(a=>a.portfolioId===pid)){
+ // Recording a buy is the exception: it may overdraw, and the later sell or deposit brings the cash back.
+ const buyRecord=op.kind==='upsertTransaction'&&after?.transactionType==='BUY';
+ if(op.kind!=='importFile'&&!buyRecord)for(const a of data.brokerAccounts.filter(a=>a.portfolioId===pid)){
   const was=accountCash(data,pid,a.id),will=accountCash(candidate,pid,a.id);
   if(will<-0.5&&will<was-0.5)throw new Error((a.accountName||a.name||'券商帳戶')+' 的現金會變成 '+Math.round(will).toLocaleString('zh-TW')+(op.kind==='deleteImportBatch'?'，因為這批匯入的入出金已被之後的交易使用。請先刪除或調整那些交易，或先記錄入金。':'。請先記錄入金，或調整這次修改。'));
  }

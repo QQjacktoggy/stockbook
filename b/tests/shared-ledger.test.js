@@ -50,8 +50,8 @@ test('Sell selects original highest-cost eligible lots and rejects oversell',()=
  assert.ok(next.appTransactions.at(-1).linkedBuyTransactionId);
  assert.equal(projectLedger(next,who,pid).lots.reduce((s,l)=>s+l.qty,0),projectLedger(raw,who,pid).lots.reduce((s,l)=>s+l.qty,0)-10);
 });
-test('Rejects invalid calendar date, future date, money and foreign account',()=>{
- for(const f of [fields({date:'2026-02-30'}),fields({date:'2099-01-01'}),fields({qty:0}),fields({fee:-1}),fields({account:'foreign'}),fields({price:999999})]){
+test('Rejects invalid calendar date, future date, money and foreign account (a large buy is allowed: cash may go negative)',()=>{
+ for(const f of [fields({date:'2026-02-30'}),fields({date:'2099-01-01'}),fields({qty:0}),fields({fee:-1}),fields({account:'foreign'})]){
   assert.throws(()=>buildOperation(fixture(),who,pid,{kind:'upsertTransaction',fields:f}));
  }
 });
@@ -642,4 +642,17 @@ test('A background save that hits a newer cloud version is reported and the scre
  const failed=events.find(e=>e.error);assert.equal(failed.error.code,'stockbook/conflict');assert.equal(failed.lost,1);
  assert.equal(m.writes,0,'nothing written over the newer version');
  assert.equal(c.view().trades.length,before,'unsaved trade is no longer shown');assert.equal(c.view().updatedAt,'new-from-A','newest cloud version was reloaded');
+});
+test('A buy may overdraw cash; a later sell or deposit brings it back, other changes still cannot overdraw',()=>{
+ const raw=fixture(),cash0=projectLedger(raw,who,pid).cash['review-a'],qty=Math.ceil((cash0+5000)/100);
+ let next=buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({qty,fee:0})});
+ const buy=next.appTransactions.at(-1),after=projectLedger(next,who,pid).cash['review-a'];
+ assert.equal(buy.transactionType,'BUY');assert.ok(after<0);assert.equal(Math.round(after),Math.round(cash0-qty*100));
+ // Editing the overdrawn buy (same or larger) is also allowed.
+ next=buildOperation(next,who,pid,{kind:'upsertTransaction',id:buy.id,fields:fields({qty:qty+10,fee:0})});
+ assert.equal(Math.round(projectLedger(next,who,pid).cash['review-a']),Math.round(cash0-(qty+10)*100));
+ // A withdrawal while negative is still refused.
+ assert.throws(()=>buildOperation(next,who,pid,{kind:'upsertCash',fields:{cashType:'WITHDRAW',account:'review-a',date:taipeiToday(),amount:100,note:''}}),/現金/);
+ next=buildOperation(next,who,pid,{kind:'upsertCash',fields:{cashType:'DEPOSIT',account:'review-a',date:taipeiToday(),amount:(qty+10)*100,note:''}});
+ assert.ok(projectLedger(next,who,pid).cash['review-a']>0);
 });
