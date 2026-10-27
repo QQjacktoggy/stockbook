@@ -191,7 +191,8 @@ function updateEstimate(rebuild=false){const f=$('#trade-form');if(!f)return;con
  if(sell){const options=f._options||[],total=options.reduce((s,o)=>s+o.shares,0),cost=options.reduce((s,o)=>s+o.shares*o.price,0),picked=Array.from(f.querySelectorAll('[name="source"]:checked')).reduce((s,x)=>s+Number(x.dataset.shares),0);
   $('#availability').innerHTML=total?(d.borrow==='sell'?'可借 <b>':'可賣 <b>')+fmt(total)+' 股</b> · 均價 '+fmt(Math.round(cost/total*100)/100)+(picked<Number(d.qty)?' · <span class="warn">已勾選只夠 '+fmt(picked)+' 股</span>':''):(d.borrow==='sell'?'這個帳戶沒有可借出的庫存':'這個帳戶沒有可賣庫存');
   let left=Number(d.qty);f.querySelectorAll('.lot').forEach(l=>{const x=l.querySelector('input'),n=Number(x.dataset.shares),use=x.checked?Math.max(0,Math.min(n,left)):0;if(x.checked)left-=use;l.querySelector('em').textContent=x.checked?fmt(use)+' 股':'';});}
- else{$('#availability').textContent='此帳戶現金 '+money(state.cash[d.account]||0);updatePicks(f,Number(d.qty)||0);}}
+ else{const old=state.trades.find(t=>t.id===d.id),cash=(state.cash[d.account]||0)+(old&&old.type==='buy'&&old.account===d.account?-old.net:0),left=cash-(gross+fees);
+  $('#availability').innerHTML='此帳戶現金 '+money(cash)+(gross>0&&left<-0.5?' · <span class="warn">現金不足，存入後會是 '+money(left)+'，之後賣出或入金補回</span>':'');updatePicks(f,Number(d.qty)||0);}}
 // Shows how many shares each picked buy-back plan or borrow takes, in pick order, like A's 扣除順序.
 function updatePicks(f,qty){const kind=f.elements.buyKind.value,box=$('#pick-summary');if(!box)return;
  const ids=pickedIds(f,kind==='rebuy'?'rebuyPick':'cyclePick').split(',').filter(Boolean),inputs=Array.from(f.querySelectorAll('.buy-picks input[data-shares]'));let left=qty,total=0;const parts=[];
