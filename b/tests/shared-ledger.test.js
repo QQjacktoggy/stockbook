@@ -271,6 +271,30 @@ test('Borrow sell from several lots, buy-back cycle, and their limits (A rules)'
  assert.equal(projectLedger(unfilled,who,pid).cycles[0].remaining,150);
  assert.equal(total(projectLedger(buildOperation(unfilled,who,pid,{kind:'deleteTransaction',id:sell.id}),who,pid)),total(before));
 });
+test('Borrow sell proceeds are held as collateral, not cash, and come back by returned shares',()=>{
+ const raw=fixture(),before=projectLedger(raw,who,pid),cashA=before.cash['review-a'];
+ const totalOf=m=>m.cash['review-a']+(m.collateral['review-a']||0);
+ assert.deepEqual(before.collateral,{});
+ // 150 shares × 112, fee 20 + tax 50 → broker holds 16,730 as 擔保價款; the bank sees nothing yet.
+ const lent=buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({type:'sell',borrow:'sell',qty:150,price:112,fee:20,tax:50,sources:'demo-buy-pm,demo-buy-a'})}),sell=lent.appTransactions.at(-1);
+ let m=projectLedger(lent,who,pid);
+ assert.equal(m.cash['review-a'],cashA,'borrow sell does not add to bank cash');
+ assert.equal(m.collateral['review-a'],16730);
+ // Return 100 of 150 shares at 108 (fee 15, incl. 借券費): pays 10,815, releases 100/150 of the collateral (11,153.33).
+ const part=buildOperation(lent,who,pid,{kind:'upsertTransaction',fields:fields({cycle:sell.id,qty:100,price:108,fee:15})}),fill=part.appTransactions.at(-1);
+ m=projectLedger(part,who,pid);
+ assert.equal(Math.round(m.cash['review-a']*100)/100,Math.round((cashA-10815+11153.33)*100)/100);
+ assert.equal(Math.round(m.collateral['review-a']*100)/100,5576.67);
+ // Return the last 50: the rest of the collateral comes back exactly, nothing left held.
+ const done=buildOperation(part,who,pid,{kind:'upsertTransaction',fields:fields({cycle:sell.id,qty:50,price:110,fee:8})});
+ m=projectLedger(done,who,pid);
+ assert.equal(m.collateral['review-a'],undefined);
+ assert.equal(Math.round(m.cash['review-a']*100)/100,Math.round((cashA+16730-10815-5508)*100)/100,'after full return cash = old cash + sale net − buy-back costs');
+ // Deleting the return puts its share back into collateral.
+ const undone=buildOperation(done,who,pid,{kind:'deleteTransaction',id:done.appTransactions.at(-1).id});
+ assert.equal(Math.round(totalOf(projectLedger(undone,who,pid))*100)/100,Math.round(totalOf(projectLedger(part,who,pid))*100)/100);
+ assert.ok(fill.id);
+});
 test('Adds a security like A and rejects duplicates',()=>{
  const raw=fixture();
  assert.throws(()=>buildOperation(raw,who,pid,{kind:'createSecurity',fields:{symbol:'0050'}}),/已存在/);

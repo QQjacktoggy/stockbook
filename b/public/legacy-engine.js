@@ -865,12 +865,49 @@ function recomputeBorrowRebuyCycles() {
   state.borrowRebuyCycles = cycles;
 }
 
+// B: a 借券賣出's proceeds are held by the broker as 擔保價款 and only reach the bank when shares are returned.
+// So the sell adds nothing to cash; each 借券回補 releases the collateral for the shares it returns
+// (by share ratio, the last return releases the rest), together with paying for the buy-back.
+// Returns txId -> { cash, collateral } for every borrow sell / return; other trades move cash by their net amount.
+function borrowCollateralFlows() {
+  const flows = new Map();
+  const sells = new Map(state.appTransactions
+    .filter((tx) => tx.transactionType === "SELL" && tx.borrowRebuyType === "BORROW_SELL")
+    .map((tx) => [tx.id, tx]));
+  const fillsBySell = new Map();
+  for (const fill of state.appTransactions.filter((tx) => tx.transactionType === "BUY" && tx.borrowRebuyType === "REBUY_FILL" && sells.has(tx.rebuyCycleId)).sort(sortByDateAsc)) {
+    if (!fillsBySell.has(fill.rebuyCycleId)) fillsBySell.set(fill.rebuyCycleId, []);
+    fillsBySell.get(fill.rebuyCycleId).push(fill);
+  }
+  for (const sell of sells.values()) {
+    const held = toNumber(effectiveTransactionAmounts(sell).netAmount);
+    const sellQty = Math.max(toNumber(sell.shares), 0);
+    flows.set(sell.id, { cash: 0, collateral: held });
+    let returnedQty = 0;
+    let released = 0;
+    for (const fill of fillsBySell.get(sell.id) || []) {
+      returnedQty = Math.min(sellQty, returnedQty + toNumber(fill.shares));
+      const target = sellQty > 0 && returnedQty >= sellQty ? held : roundMoney(held * (sellQty > 0 ? returnedQty / sellQty : 0));
+      const release = roundMoney(target - released);
+      released = target;
+      flows.set(fill.id, { cash: roundMoney(toNumber(effectiveTransactionAmounts(fill).netAmount) + release), collateral: -release });
+    }
+  }
+  return flows;
+}
+
+function transactionCashFlow(tx, flows) {
+  return flows.get(tx.id) || { cash: toNumber(effectiveTransactionAmounts(tx).netAmount), collateral: 0 };
+}
+
 function recomputeCashLedger() {
   const ledger = [];
   const grouped = new Map();
+  const flows = borrowCollateralFlows();
   const transactions = [...state.appTransactions].sort(sortByDateAsc);
   for (const tx of transactions) {
-    const txAmounts = effectiveTransactionAmounts(tx);
+    const flow = transactionCashFlow(tx, flows);
+    const txAmounts = { netAmount: flow.cash };
     const key = `${tx.portfolioId}:${tx.brokerAccountId}`;
     const running = (grouped.get(key) || 0) + txAmounts.netAmount;
     grouped.set(key, running);
@@ -887,6 +924,7 @@ function recomputeCashLedger() {
       referenceId: tx.id,
       description: `${tx.transactionType} ${securityLabel(tx.securityId)}`,
       amount: txAmounts.netAmount,
+      collateral: flow.collateral,
       runningBalance: running,
       createdAt: nowIso()
     });
@@ -1871,11 +1909,12 @@ function buildInventoryRiskMetrics(model) {
 }
 
 function buildCashflowMetrics(model) {
+  const flows = borrowCollateralFlows();
   let running = 0;
   const rows = model.transactions
     .filter((tx) => ["DEPOSIT", "WITHDRAW", "BUY", "SELL"].includes(tx.transactionType))
     .map((tx) => {
-      const amount = toNumber(effectiveTransactionAmounts(tx).netAmount);
+      const amount = transactionCashFlow(tx, flows).cash;
       running += amount;
       return {
         date: tx.tradeDate,
@@ -1889,7 +1928,7 @@ function buildCashflowMetrics(model) {
   const withdraws = reportSum(model.transactions.filter((tx) => tx.transactionType === "WITHDRAW"), (tx) => Math.abs(toNumber(effectiveTransactionAmounts(tx).netAmount)));
   const sellNet = reportSum(model.transactions.filter((tx) => tx.transactionType === "SELL"), (tx) => Math.max(0, toNumber(effectiveTransactionAmounts(tx).netAmount)));
   const inventoryMarketValue = reportSum(model.inventoryLots, (lot) => inventoryLotReportMarketValue(lot, model.benchmark.reportPrice));
-  const totalAssets = model.metrics.cash + inventoryMarketValue;
+  const totalAssets = model.metrics.cash + toNumber(model.metrics.collateral) + inventoryMarketValue;
   return {
     rows,
     deposits,
@@ -2376,9 +2415,10 @@ function benchmarkOperationSnapshot(portfolioId, brokerAccountId, transactions, 
     const direction = tx.transactionType === "BUY" ? 1 : -1;
     sharesBySecurity.set(tx.securityId, (sharesBySecurity.get(tx.securityId) || 0) + direction * toNumber(tx.shares));
   }
+  // Borrow-sell collateral still belongs to the user, so it counts as cash for the 0050 comparison.
   const cash = reportSum(
     state.cashLedger.filter((row) => row.portfolioId === portfolioId && (!accountScoped || row.brokerAccountId === brokerAccountId) && row.tradeDate <= date),
-    (row) => row.amount
+    (row) => toNumber(row.amount) + toNumber(row.collateral)
   );
   const actualShares = toNumber(sharesBySecurity.get(benchmarkSecurityId));
   let otherInventoryValue = 0;
@@ -2404,12 +2444,16 @@ function reportAssetSeries(portfolioId, transactions, brokerAccountId = "ALL") {
     if (!byDate.has(tx.tradeDate)) byDate.set(tx.tradeDate, []);
     byDate.get(tx.tradeDate).push(tx);
   }
+  const flows = borrowCollateralFlows();
   let cash = 0;
+  let collateral = 0;
   let inventory = 0;
   return Array.from(byDate.keys()).sort().map((date) => {
     for (const tx of byDate.get(date) || []) {
       const amounts = effectiveTransactionAmounts(tx);
-      cash += toNumber(amounts.netAmount);
+      const flow = transactionCashFlow(tx, flows);
+      cash += flow.cash;
+      collateral += flow.collateral;
       if (tx.transactionType === "BUY") inventory += Math.abs(toNumber(amounts.netAmount));
       if (tx.transactionType === "SELL") inventory -= toNumber(sellCostByTransaction.get(tx.id));
       if (inventory < 0 && inventory > -0.01) inventory = 0;
@@ -2418,7 +2462,7 @@ function reportAssetSeries(portfolioId, transactions, brokerAccountId = "ALL") {
       date: compactDate(date),
       cash: roundMoney(cash),
       inventory: roundMoney(inventory),
-      assets: roundMoney(cash + inventory)
+      assets: roundMoney(cash + collateral + inventory)
     };
   });
 }
@@ -2565,6 +2609,7 @@ function buildPrettyPdfReportHtml(model) {
       <div class="summary-list">
         ${pdfSummaryLine("累計入金", fmtMoney(model.depositsToDate))}
         ${pdfSummaryLine("現金餘額", fmtMoney(model.metrics.cash))}
+        ${toNumber(model.metrics.collateral) ? pdfSummaryLine("借券擔保中", fmtMoney(model.metrics.collateral)) : ""}
         ${pdfSummaryLine("累計已實現毛利", fmtMoney(model.yearSummary.gross))}
         ${pdfSummaryLine("累計費稅", fmtMoney(model.yearSummary.costs))}
         ${pdfSummaryLine("累計已實現淨利", pdfSignedMoney(model.yearSummary.net))}
@@ -3146,10 +3191,10 @@ function scopedTransactions(portfolioId = selectedPortfolioId()) {
   return state.appTransactions.filter((tx) => tx.userId === user.id && tx.portfolioId === portfolioId);
 }
 
-function cashBalance(portfolioId, brokerAccountId = "ALL") {
+function cashBalance(portfolioId, brokerAccountId = "ALL", field = "amount") {
   return sum(
     state.cashLedger.filter((row) => row.portfolioId === portfolioId && (brokerAccountId === "ALL" || row.brokerAccountId === brokerAccountId)),
-    "amount"
+    field
   );
 }
 
@@ -3158,6 +3203,7 @@ function portfolioMetrics(portfolioId, brokerAccountId = "ALL") {
   const inAccount = (item) => !accountScoped || item.brokerAccountId === brokerAccountId;
   return {
     cash: cashBalance(portfolioId, brokerAccountId || "ALL"),
+    collateral: cashBalance(portfolioId, brokerAccountId || "ALL", "collateral"),
     remainingShares: sum(borrowAdjustedInventoryLots(state.buyLots).filter((lot) => lot.portfolioId === portfolioId && inAccount(lot)), "remainingShares"),
     realizedNetProfit: sum(realizedProfitEvents(portfolioId, accountScoped ? brokerAccountId : "ALL"), "netProfit"),
     openRebuyShares: sum(state.rebuyTasks.filter((task) => task.portfolioId === portfolioId && inAccount(task) && ["OPEN", "PARTIAL_FILLED"].includes(task.status)), "remainingRebuyShares"),
