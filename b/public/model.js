@@ -156,11 +156,37 @@ function duplicateExecutions(data,pid){
  for(const g of groups.values()){let kept=[];for(const copies of g.values()){copies.forEach((x,i)=>{if(i<kept.length)extras.set(x.id,kept[i].id);});if(copies.length>kept.length)kept=[...kept,...copies.slice(kept.length)];}}
  return extras;
 }
+// 借券回補 across several borrows, like 買回: the bought shares go to the picked borrows in tick order (each up to what it still owes),
+// stored as one REBUY_FILL per borrow so A reads them unchanged; shares beyond them become a normal buy (inventory).
+// Fee and tax are split by shares (whole dollars, the last part takes the rounding) so the parts add up to the broker trade.
+function coverBorrows(raw,identity,portfolioId,op,data){
+ const f=op.fields,ids=String(f.cycle).split(',').map(x=>x.trim()).filter(Boolean),qty=Number(f.qty),fee=Number(f.fee),tax=Number(f.tax);
+ if(new Set(ids).size!==ids.length)throw new Error('同一筆借券不能重複勾選。');
+ if(String(f.rebuyIds||'').trim())throw new Error('借券交易不能同時配對買回計畫。');
+ if(!Number.isInteger(qty)||qty<=0||!Number.isFinite(fee)||fee<0||!Number.isFinite(tax)||tax<0)throw new Error('股數、成交價或費用不正確。');
+ let left=qty;const parts=[];
+ for(const id of ids){
+  const cycle=(data.borrowRebuyCycles||[]).find(c=>c.id===id);
+  if(!cycle)throw new Error('找不到對應的借券任務，請重新載入。');
+  const use=Math.min(num(cycle.remainingRebuyQty),left);
+  if(use>0){parts.push({cycle:id,qty:use});left-=use;}
+ }
+ if(!parts.length)throw new Error('選到的借券已全部回補，請重新載入。');
+ if(left>0)parts.push({cycle:'',qty:left});
+ let out=raw,feeLeft=fee,taxLeft=tax;
+ parts.forEach((p,i)=>{
+  const last=i===parts.length-1,pf=last?feeLeft:Math.floor(fee*p.qty/qty),pt=last?taxLeft:Math.floor(tax*p.qty/qty);feeLeft-=pf;taxLeft-=pt;
+  out=buildOperation(out,identity,portfolioId,{...op,split:true,fields:{...f,cycle:p.cycle,qty:p.qty,fee:Math.round(pf*100)/100,tax:Math.round(pt*100)/100}});
+ });
+ return out;
+}
 export function buildOperation(raw,identity,portfolioId,op){
  const {data,user,portfolioId:pid}=evaluate(raw,identity,portfolioId);
  if(!canWrite(data,user,pid))throw new Error('這份投資帳本沒有編輯權限。');
  const next=mobileCloneLedger(raw),now=new Date().toISOString();next.appTransactions=next.appTransactions||[];
  let before=null,after=null,entityId='',action='',entityType='transaction';
+ // A new 借券回補 may cover several borrows in tick order; see coverBorrows.
+ if(op.kind==='upsertTransaction'&&!op.id&&!op.split&&op.fields?.type==='buy'&&String(op.fields.cycle||'').trim())return coverBorrows(raw,identity,portfolioId,op,data);
  if(op.kind==='acceptReconciliation'){
   // One key (檢查 → 採用) or several (A's 採用券商金額 for every pending fee/amount difference).
   const keys=[...new Set(op.keys||[op.key])];

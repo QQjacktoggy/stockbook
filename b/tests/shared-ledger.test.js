@@ -251,7 +251,10 @@ test('Borrow sell from several lots, buy-back cycle, and their limits (A rules)'
  assert.deepEqual(m.cycles.map(c=>[c.id,c.remaining,c.status]),[[sell.id,150,'open']]);
  assert.equal(borrowOptions(lent,who,pid,fields({type:'sell'})).reduce((s,o)=>s+o.shares,0),total(before)-150-100,'other account not offered; reserved shares not lendable twice');
  // Buy-back fills the cycle.
- assert.throws(()=>buildOperation(lent,who,pid,{kind:'upsertTransaction',fields:fields({cycle:sell.id,qty:200,price:108})}),/待回補/);
+ // Buying more than the borrow owes: the extra becomes a normal buy instead of an error.
+ const over=buildOperation(lent,who,pid,{kind:'upsertTransaction',fields:fields({cycle:sell.id,qty:200,price:108,fee:0})});
+ assert.deepEqual(over.appTransactions.slice(-2).map(t=>[t.borrowRebuyType,t.rebuyCycleId,t.shares]),[['REBUY_FILL',sell.id,150],['','',50]]);
+ assert.equal(projectLedger(over,who,pid).cycles[0].status,'closed');assert.equal(total(projectLedger(over,who,pid)),total(before)+50);
  assert.throws(()=>buildOperation(lent,who,pid,{kind:'upsertTransaction',fields:fields({cycle:sell.id,account:'review-b'})}),/相同/);
  assert.throws(()=>buildOperation(lent,who,pid,{kind:'upsertTransaction',fields:fields({cycle:'nope'})}),/借券任務/);
  const filled=buildOperation(lent,who,pid,{kind:'upsertTransaction',fields:fields({cycle:sell.id,qty:100,price:108,fee:0})}),fill=filled.appTransactions.at(-1);
@@ -270,6 +273,36 @@ test('Borrow sell from several lots, buy-back cycle, and their limits (A rules)'
  const unfilled=buildOperation(filled,who,pid,{kind:'deleteTransaction',id:fill.id});
  assert.equal(projectLedger(unfilled,who,pid).cycles[0].remaining,150);
  assert.equal(total(projectLedger(buildOperation(unfilled,who,pid,{kind:'deleteTransaction',id:sell.id}),who,pid)),total(before));
+});
+test('借券回補 covers several borrows in tick order; less leaves the rest owed, more becomes inventory',()=>{
+ const raw=fixture(),before=projectLedger(raw,who,pid),total=m=>m.lots.reduce((s,l)=>s+l.qty,0);
+ const lend=(r,o)=>{const n=buildOperation(r,who,pid,{kind:'upsertTransaction',fields:fields({type:'sell',borrow:'sell',qty:50,fee:0,tax:0,...o})});return [n,n.appTransactions.at(-1)];};
+ const [one,first]=lend(raw,{price:112,sources:'demo-buy-pm'}),[two,second]=lend(one,{price:115,sources:'demo-buy-a'});
+ const cover=(r,o)=>buildOperation(r,who,pid,{kind:'upsertTransaction',fields:fields({price:108,...o})});
+ const left=m=>Object.fromEntries(m.cycles.map(c=>[c.id,c.remaining]));
+ // Tick order second → first, 30 shares: all from the second, the first untouched.
+ let next=cover(two,{cycle:second.id+','+first.id,qty:30,fee:5});
+ assert.deepEqual(left(projectLedger(next,who,pid)),{[first.id]:50,[second.id]:20});
+ assert.equal(next.appTransactions.length,two.appTransactions.length+1,'a borrow that takes nothing gets no record');
+ // 120 shares: 50 to the second, 50 to the first, 20 left over as a normal buy; fee and tax add up to the trade.
+ next=cover(two,{cycle:second.id+','+first.id,qty:120,fee:20,tax:7,category:'TRADING'});
+ const parts=next.appTransactions.slice(-3);
+ assert.deepEqual(parts.map(t=>[t.borrowRebuyType,t.rebuyCycleId,t.shares]),[['REBUY_FILL',second.id,50],['REBUY_FILL',first.id,50],['','',20]]);
+ assert.equal(parts.reduce((s,t)=>s+t.fee,0),20);assert.equal(parts.reduce((s,t)=>s+t.tax,0),7);
+ assert.equal(parts[2].strategyCategory,'TRADING');assert.equal(parts[2].buyIntent,'NEW');
+ const m=projectLedger(next,who,pid);
+ assert.deepEqual(left(m),{[first.id]:0,[second.id]:0});
+ assert.equal(total(m),total(before)+20,'returned shares are back and the extra 20 is new inventory');
+ const cash=r=>projectLedger(r,who,pid).cash['review-a'];
+ assert.equal(Math.round((cash(two)-cash(next))*100)/100,120*108+27,'cash drops by the whole trade once');
+ // Exactly what is owed: no extra buy.
+ assert.equal(cover(two,{cycle:first.id+','+second.id,qty:100,fee:0}).appTransactions.length,two.appTransactions.length+2);
+ // Bad picks.
+ assert.throws(()=>cover(two,{cycle:first.id+','+first.id,qty:10}),/重複/);
+ assert.throws(()=>cover(two,{cycle:first.id+',nope',qty:10}),/借券任務/);
+ const done=cover(two,{cycle:first.id,qty:50,fee:0});
+ assert.throws(()=>cover(done,{cycle:first.id,qty:10}),/已全部回補/);
+ assert.throws(()=>cover(two,{cycle:first.id,qty:10,date:'2000-01-02'}),/早於/);
 });
 test('Adds a security like A and rejects duplicates',()=>{
  const raw=fixture();
