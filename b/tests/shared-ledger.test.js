@@ -7,7 +7,7 @@ import {projectLedger,buildOperation,sellOptions,borrowOptions,exchangePreview,e
 import {mobileBackupEnvelope,mobileParseBackup,mobileExecutionChecksum} from '../public/legacy-engine.js';
 import {parseFolderId,latestByAccount,listCsvFiles,downloadCsv,decodeCsv,DRIVE_SCOPE} from '../public/drive-import.js';
 import {fetchQuote,benchmarkFor,yahooSymbolFor} from '../public/quotes.js';
-import {createLedgerClient,namespaceFor,compressLedger,decodeLedger} from '../public/cloud-client.js';
+import {createLedgerClient,namespaceFor,compressLedger,decodeLedger,cachedLedgerView,SDK_FILES} from '../public/cloud-client.js';
 const original=JSON.parse(readFileSync(new URL('./fixture.json',import.meta.url)));
 const who={uid:'fake-uid',email:'review@example.test',emailVerified:true,displayName:'測試'};
 const pid='review-p';
@@ -704,3 +704,59 @@ test('A second borrow may lend the rest of a partly lent lot; lots go to borrows
  // Still refused when the shares really are not there.
  assert.throws(()=>lend(two,{date:'2026-11-13',qty:200,sources:'demo-buy-a'}),/借出股數/);
 });
+
+// Fast start: the ledger this device last read is cached, and an unchanged cloud head skips the chunk download.
+function memoryStorage(){const m=new Map();return {getItem:k=>m.has(k)?m.get(k):null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k),get size(){return m.size;}};}
+async function chunkedDocs(){const payload=await compressLedger(fixture());return new Map([[head,{chunkCount:1,isCompressed:true,ownerUid:who.uid,ownerEmail:who.email,updatedAt:'old'}],[head+'/chunks/chunk_0',{data:payload,index:0,ownerUid:who.uid,updatedAt:'old'}]]);}
+function countingSdk(docs){
+ const m=mockSdk(docs),reads={tx:0,heads:0},run=m.sdk[2].runTransaction;
+ m.sdk[2].runTransaction=async(db,fn)=>{reads.tx++;return run(db,fn);};
+ m.sdk[2].getDoc=async key=>{reads.heads++;return {exists:()=>docs.has(key),data:()=>structuredClone(docs.get(key))};};
+ return {...m,reads};
+}
+async function withStorage(run){const prior=globalThis.localStorage;globalThis.localStorage=memoryStorage();try{return await run(globalThis.localStorage);}finally{if(prior===undefined)delete globalThis.localStorage;else globalThis.localStorage=prior;}}
+test('A second visit shows the cached ledger at once and skips the chunk download when the cloud head is unchanged',()=>withStorage(async store=>{
+ const docs=await chunkedDocs();
+ const first=countingSdk(docs),c1=await createLedgerClient({}, {sdk:first.sdk});await c1.reload();
+ assert.equal(first.reads.tx,1,'first visit reads the whole ledger');assert.equal(store.size,1,'ledger cached on this device');
+ const shown=await cachedLedgerView();assert.equal(shown.uid,who.uid);assert.equal(shown.model.trades.length,c1.view().trades.length);
+ const second=countingSdk(docs),c2=await createLedgerClient({}, {sdk:second.sdk});const view=await c2.reload();
+ assert.equal(second.reads.heads,1);assert.equal(second.reads.tx,0,'unchanged head: no chunk download');
+ assert.equal(view.trades.length,c1.view().trades.length);
+ // Saving still checks every chunk against the cloud, then refreshes the cache.
+ await c2.commit({kind:'upsertTransaction',fields:fields()},{wait:true});
+ const after=await cachedLedgerView();assert.equal(after.model.trades.length,view.trades.length+1);
+}));
+test('A changed cloud head downloads the full ledger again',()=>withStorage(async()=>{
+ const docs=await chunkedDocs(),c1=await createLedgerClient({}, {sdk:countingSdk(docs).sdk});await c1.reload();
+ await c1.commit({kind:'upsertTransaction',fields:fields()},{wait:true});
+ const before=(await cachedLedgerView()).model.trades.length;
+ docs.get(head).updatedAt='new-from-A';
+ const m=countingSdk(docs),c2=await createLedgerClient({}, {sdk:m.sdk});await c2.reload();
+ assert.equal(m.reads.tx,1,'head changed: full read');assert.equal(c2.view().updatedAt,'new-from-A');assert.equal(c2.view().trades.length,before);
+}));
+test('A stale cache never overwrites the cloud: changed chunks still refuse the save, and the retry reads the cloud',()=>withStorage(async()=>{
+ const docs=await chunkedDocs(),c1=await createLedgerClient({}, {sdk:countingSdk(docs).sdk});await c1.reload();
+ const changed=await compressLedger({...fixture(),appTransactions:[]});docs.get(head+'/chunks/chunk_0').data=changed;
+ const m=countingSdk(docs),c2=await createLedgerClient({}, {sdk:m.sdk});await c2.reload();assert.equal(m.reads.tx,0,'cache used');
+ await assert.rejects(c2.commit({kind:'upsertTransaction',fields:fields()},{wait:true}),{code:'stockbook/conflict'});
+ assert.equal(m.writes,0);assert.equal(docs.get(head+'/chunks/chunk_0').data,changed,'cloud untouched');
+ assert.equal(c2.view().trades.length,0,'after the refusal B shows the real cloud ledger');
+}));
+test('Another account, signing out, or a cache-less device never uses the cached ledger',()=>withStorage(async store=>{
+ const docs=await chunkedDocs(),c1=await createLedgerClient({}, {sdk:countingSdk(docs).sdk});await c1.reload();
+ const otherDocs=new Map([['stockLedgers/'+namespaceFor('other@example.test'),{state:fixture(),ownerUid:'other',ownerEmail:'other@example.test',updatedAt:'x'}]]);
+ const other=countingSdk(otherDocs);other.auth.currentUser={uid:'other',email:'other@example.test',emailVerified:true,displayName:''};
+ const c2=await createLedgerClient({}, {sdk:other.sdk});await assert.rejects(c2.reload(),/不符/);assert.equal(other.reads.heads,0,'cache of another account is ignored');
+ await c1.signOut();assert.equal(store.size,0,'sign-out clears the cache');assert.equal(await cachedLedgerView(),null);
+}));
+test('Phones restore the signed-in user before loading the Google sign-in frame',async()=>{
+ let options=null;class Resolver{get _shouldInitProactively(){return true;}}
+ const m=mockSdk(new Map()),auth=m.sdk[1].getAuth();
+ m.sdk[1]={...m.sdk[1],browserPopupRedirectResolver:Resolver,indexedDBLocalPersistence:'idb',browserLocalPersistence:'local',browserSessionPersistence:'session',initializeAuth:(_app,o)=>{options=o;return auth;}};
+ await createLedgerClient({}, {sdk:m.sdk});
+ assert.deepEqual(options.persistence,['idb','local','session'],'same persistence as getAuth: existing sign-ins are kept');
+ assert.equal(new options.popupRedirectResolver()._shouldInitProactively,false);
+ assert.ok(new options.popupRedirectResolver() instanceof Resolver);
+});
+test('B loads Firestore Lite',()=>assert.ok(SDK_FILES.some(f=>f.endsWith('/firebase-firestore-lite.js'))&&!SDK_FILES.some(f=>f.endsWith('/firebase-firestore.js'))));
