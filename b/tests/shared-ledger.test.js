@@ -689,6 +689,21 @@ test('A buy may overdraw cash; a later sell or deposit brings it back, other cha
  next=buildOperation(next,who,pid,{kind:'upsertCash',fields:{cashType:'DEPOSIT',account:'review-a',date:taipeiToday(),amount:(qty+10)*100,note:''}});
  assert.ok(projectLedger(next,who,pid).cash['review-a']>0);
 });
+test('A second borrow may lend the rest of a partly lent lot; lots go to borrows by trade date and keep the tick order',()=>{
+ const raw=fixture(),lend=(r,o)=>buildOperation(r,who,pid,{kind:'upsertTransaction',fields:fields({type:'sell',borrow:'sell',fee:0,tax:0,price:112,...o})});
+ const one=lend(raw,{date:'2026-11-10',qty:50,sources:'demo-buy-pm'}),first=one.appTransactions.at(-1);
+ // The default pick (highest price first) puts the partly lent 105 lot first; this used to be refused as if it took the first borrow's shares.
+ const two=lend(one,{date:'2026-11-12',qty:100,price:115,sources:'demo-buy-pm,demo-buy-a'}),second=two.appTransactions.at(-1);
+ assert.equal(second.sourceInventoryLotId,'demo-buy-pm,demo-buy-a');
+ const lent=Object.fromEntries(projectLedger(two,who,pid).cycles.map(c=>[c.id,c.lent.map(x=>[x.id,x.shares])]));
+ assert.deepEqual(lent[first.id],[['demo-buy-pm',50]]);
+ assert.deepEqual(lent[second.id],[['demo-buy-pm',50],['demo-buy-a',50]]);
+ // Tick order is kept: lending from the 100 lot first is stored that way.
+ const other=lend(one,{date:'2026-11-12',qty:100,sources:'demo-buy-a,demo-buy-pm'}).appTransactions.at(-1);
+ assert.equal(other.sourceInventoryLotId,'demo-buy-a,demo-buy-pm');
+ // Still refused when the shares really are not there.
+ assert.throws(()=>lend(two,{date:'2026-11-13',qty:200,sources:'demo-buy-a'}),/借出股數/);
+});
 function overdrawThenSell(){
  const raw=fixture(),cash0=projectLedger(raw,who,pid).cash['review-a'],qty=Math.ceil((cash0+5000)/100);
  let next=buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({qty,fee:0})});

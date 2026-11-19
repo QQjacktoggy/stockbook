@@ -461,6 +461,30 @@ function borrowSourceReservations(excludedSellId = "") {
   return reserved;
 }
 
+// Lots handed out to borrow sells by trade date, as borrowSourceReservations does: the shares each borrow still holds per source lot,
+// and the shares it cannot find (short).
+function borrowSourceAllocations() {
+  const reserved = new Map(), short = new Map(), lent = new Map();
+  const borrowSells = state.appTransactions
+    .filter((tx) => tx.transactionType === "SELL" && tx.borrowRebuyType === "BORROW_SELL")
+    .sort(sortByDateAsc);
+  for (const sell of borrowSells) {
+    let left = borrowRemainingForSell(sell);
+    for (const sourceId of normalizeSourceInventoryLotIds(sell.sourceInventoryLotId || sell.linkedBuyTransactionId)) {
+      const lot = findBuyLotBySourceId(sourceId);
+      if (!lot || left <= 0) continue;
+      const primaryId = lotPrimarySourceId(lot);
+      const take = Math.min(left, Math.max(0, toNumber(lot.remainingShares) - toNumber(reserved.get(primaryId))));
+      if (take <= 0) continue;
+      reserved.set(primaryId, toNumber(reserved.get(primaryId)) + take);
+      left -= take;
+      lent.set(sell.id, [...(lent.get(sell.id) || []), { id: primaryId, shares: take }]);
+    }
+    short.set(sell.id, Math.max(0, left));
+  }
+  return { short, lent };
+}
+
 function borrowAdjustedInventoryLots(lots = state.buyLots) {
   const reservations = borrowSourceReservations();
   return lots.map((lot) => {
@@ -3281,6 +3305,7 @@ export function acceptanceKey(link) {return brokerDiffAcceptanceKey(link);}
 export function mobileNormalizeTransaction(tx) {return normalizeTransaction(tx);}
 export function mobileSettings(data,portfolioId) {state=data;return getPortfolioSettings(portfolioId);}
 export function mobileBorrowOptions(data,account,symbol,date,excludedId='',selected='') {state=data;return borrowSourceLotOptions(account,symbol,selected,excludedId,date);}
+export function mobileBorrowAllocations(data) {state=data;return borrowSourceAllocations();}
 export function mobileValidateBorrow(data,sources,shares,account,securityId,portfolioId,excludedId,date) {state=data;return validateBorrowSellSourceLots(sources,shares,account,securityId,portfolioId,excludedId,date);}
 export function mobileExchangeLots(data,portfolioId,accountId) {state=data;return inventoryCostExchangeEligibleLots(portfolioId,accountId);}
 export function mobileExchangeEligible(lot) {return inventoryCostExchangeLotIsEligible(lot);}
