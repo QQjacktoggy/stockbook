@@ -704,3 +704,24 @@ test('A second borrow may lend the rest of a partly lent lot; lots go to borrows
  // Still refused when the shares really are not there.
  assert.throws(()=>lend(two,{date:'2026-11-13',qty:200,sources:'demo-buy-a'}),/借出股數/);
 });
+function overdrawThenSell(){
+ const raw=fixture(),cash0=projectLedger(raw,who,pid).cash['review-a'],qty=Math.ceil((cash0+5000)/100);
+ let next=buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({qty,fee:0})});
+ const negative=projectLedger(next,who,pid).cash['review-a'];assert.ok(negative<0);
+ next=buildOperation(next,who,pid,{kind:'upsertTransaction',fields:fields({type:'sell',qty,price:110,fee:0,tax:0})});
+ const sell=next.appTransactions.at(-1);
+ assert.equal(sell.transactionType,'SELL');assert.ok(projectLedger(next,who,pid).cash['review-a']>0);
+ return {next,sell,negative,qty};
+}
+test('A mistaken sell can be deleted even if cash goes back to the earlier negative balance',()=>{
+ const {next,sell,negative}=overdrawThenSell();
+ const done=buildOperation(next,who,pid,{kind:'deleteTransaction',id:sell.id});
+ assert.ok(!done.appTransactions.some(t=>t.id===sell.id));
+ assert.equal(Math.round(projectLedger(done,who,pid).cash['review-a']),Math.round(negative));
+});
+test('A mistaken sell can be edited to fewer shares even if cash goes negative',()=>{
+ const {next,sell}=overdrawThenSell();
+ const done=buildOperation(next,who,pid,{kind:'upsertTransaction',id:sell.id,fields:fields({type:'sell',qty:10,price:110,fee:0,tax:0})});
+ assert.equal(done.appTransactions.find(t=>t.id===sell.id).shares,10);
+ assert.ok(projectLedger(done,who,pid).cash['review-a']<0);
+});
