@@ -1,4 +1,4 @@
-import {createLedgerClient,errorText} from './cloud-client.js';
+import {createLedgerClient,errorText,cachedLedgerView} from './cloud-client.js';
 import {taipeiToday} from './model.js';
 import {fetchQuote,benchmarkFor} from './quotes.js';
 import {parseFolderId,defaultKeyword,latestByAccount,decodeCsv} from './drive-import.js';
@@ -516,6 +516,8 @@ async function click(b){
  if(b.hasAttribute('data-dismiss-sync')){$('#sync-error').hidden=true;$('#sync-error').innerHTML='';return;}
  if(b.hasAttribute('data-login')||b.hasAttribute('data-login-redirect')){if(!client)throw new Error('Firebase 尚未連接，請重新整理後再試。');if(identity)return reload();return client.signIn(b.hasAttribute('data-login-redirect'));}
  if(!state)return;
+ // While the ledger saved on this phone is shown and the cloud check is still running, only switching pages works.
+ if(cachedUid&&!b.dataset.page){toast('正在載入最新的雲端帳本，請稍候幾秒。');return;}
  if(b.hasAttribute('data-native-settings'))return accountSecuritySheet();
  if(b.hasAttribute('data-native-reauth')||b.hasAttribute('data-native-reauth-redirect')){b.disabled=true;try{await client.nativeAuth.reauthenticate(b.hasAttribute('data-native-reauth-redirect'));if(b.isConnected)return accountSecuritySheet();}finally{if(b.isConnected)b.disabled=false;}return;}
  if(b.hasAttribute('data-native-reset')){b.disabled=true;try{await client.nativeAuth.requestPasswordReset();toast('已要求 Firebase 寄送密碼重設信，請自行到信箱完成');}finally{if(b.isConnected)b.disabled=false;}return;}
@@ -634,9 +636,14 @@ document.addEventListener('submit',e=>{if(e.target.id==='email-login-form'){e.pr
  if(e.target.id==='security-form'&&e.target.dataset.editId){e.preventDefault();const f=e.target;submitForm(f,{kind:'updateSecurity',id:f.dataset.editId,fields:Object.fromEntries(new FormData(f))},()=>toast('股票已更新'));}
  else if(e.target.id==='security-form'){e.preventDefault();const f=e.target,fields=Object.fromEntries(new FormData(f)),back=returnForm;submitForm(f,{kind:'createSecurity',fields},next=>{const code=Object.keys(next.stocks).find(k=>next.stocks[k].symbol===String(fields.symbol).trim().toUpperCase());toast('已新增 '+String(fields.symbol).trim().toUpperCase());if(back)form(back.type||'buy','','',{...back,code,price:''});});}if(e.target.id==='namespace-form'){e.preventDefault();const namespace=new FormData(e.target).get('namespace');if(!identity){authError='請先登入原有帳號。';return render();}loading=true;lastNamespace=namespace;client.reload({namespace}).then(next=>{setState(next);authError='';noLedger=false;render();}).catch(error=>{authError=errorText(error);noLedger=missingLedger(error);render();}).finally(()=>{loading=false;render();});}});
 render();loading=true;render();
+// Show the ledger this phone last loaded right away (before Firebase has loaded), then replace it with the cloud version.
+let cachedUid='';
+function showCached(on){if(!on)cachedUid='';const badge=$('#sync-status');badge.textContent=on?'載入最新資料…':'同步中…';badge.hidden=!on&&!client?.syncing;}
+cachedLedgerView().then(c=>{if(!c||state||(authEpoch&&(!loading||identity?.uid!==c.uid)))return;cachedUid=c.uid;setState(c.model);page='home';showCached(true);render();}).catch(()=>{});
 createLedgerClient(window.stockLedgerFirebaseConfig,{onSyncChange:syncChanged,onAuthChange:async(user,api,error)=>{
-const ticket=++authEpoch;client=api;identity=user;state=null;$('#sync-error').hidden=true;$('#sync-status').hidden=true;loading=!!user;authError=error?errorText(error):'';closeSheet(false);render();
-noLedger=false;lastNamespace='';if(user&&!error){try{const next=await api.reload();if(ticket===authEpoch){setState(next);page='home';authError='';}}catch(e){if(ticket===authEpoch){authError=errorText(e);noLedger=missingLedger(e);}}finally{if(ticket===authEpoch){loading=false;render();}}}else{loading=false;render();}
+const ticket=++authEpoch,keep=!!user&&!error&&!!state&&cachedUid===user.uid;client=api;identity=user;$('#sync-error').hidden=true;
+if(!keep){state=null;cachedUid='';}showCached(keep);loading=!!user;authError=error?errorText(error):'';if(!keep)closeSheet(false);render();
+noLedger=false;lastNamespace='';if(user&&!error){try{const next=await api.reload();if(ticket===authEpoch){setState(next);if(!keep)page='home';authError='';}}catch(e){if(ticket===authEpoch){state=null;authError=errorText(e);noLedger=missingLedger(e);}}finally{if(ticket===authEpoch){showCached(false);loading=false;render();}}}else{loading=false;render();}
 }}).then(api=>{client=api;loading=false;if(!state)render();}).catch(error=>{authError=errorText(error);loading=false;render();});
 
 

@@ -3,6 +3,33 @@ import { mobileBackupEnvelope, mobileParseBackup } from './legacy-engine.js';
 import { DRIVE_SCOPE, listCsvFiles, downloadCsv, folderName } from './drive-import.js';
 import {createNativeAuth,nativeAuthError} from './native-auth.js';
 const SDK='https://www.gstatic.com/firebasejs/10.12.5/';
+// B only needs single-document reads and transactions, so it loads Firestore Lite (about a quarter of the full SDK, plain HTTPS requests).
+export const SDK_FILES=['firebase-app.js','firebase-auth.js','firebase-firestore-lite.js'].map(f=>SDK+f);
+// The last ledger this device read or saved, so the next visit can show it at once while the cloud check runs.
+// It never replaces the cloud check: saving stays blocked until the cloud version has been read.
+const CACHE_KEY='stockbook-b-ledger-cache-v1';
+function storage(){try{return globalThis.localStorage||null;}catch{return null;}}
+export function readLedgerCache(){
+ try{const text=storage()?.getItem(CACHE_KEY);if(!text)return null;const c=JSON.parse(text);
+  if(c?.v!==1||typeof c.uid!=='string'||typeof c.email!=='string'||!c.shot||typeof c.shot.ns!=='string'||!c.shot.main||!Array.isArray(c.shot.chunks))return null;
+  return c;}catch{return null;}
+}
+export function clearLedgerCache(){try{storage()?.removeItem(CACHE_KEY);}catch{}}
+function writeLedgerCache(who,shot,{namespace='',portfolioId='',account='all'}={}){
+ try{const s=storage();if(!s)return;
+  if(typeof shot.payload!=='string'){clearLedgerCache();return;}
+  s.setItem(CACHE_KEY,JSON.stringify({v:1,uid:who.uid,email:who.email,displayName:who.displayName||'',namespace,portfolioId,account,savedAt:new Date().toISOString(),shot:{ns:shot.ns,main:shot.main,chunks:shot.chunks}}));
+ }catch{clearLedgerCache();}
+}
+function cachedPayload(shot){return shot.chunks.map(c=>c.data).join('');}
+// Shows the cached ledger before Firebase has even loaded. Returns null when there is nothing usable.
+export async function cachedLedgerView(){
+ const c=readLedgerCache();if(!c)return null;
+ try{const raw=await decodeLedger(cachedPayload(c.shot)),who={uid:c.uid,email:c.email,displayName:c.displayName};
+  const model=projectLedger(raw,who,'','all');model.updatedAt=c.shot.main.updatedAt||'';
+  return {uid:c.uid,model};
+ }catch{clearLedgerCache();return null;}
+}
 export function namespaceFor(email,custom=''){const value=String(custom||String(email||'').toLowerCase()).trim().replace(/[^a-zA-Z0-9._-]/g,'_');if(!value)throw new Error('找不到帳本名稱。');return value;}
 export function canonical(value){if(value===null||typeof value!=='object')return JSON.stringify(value);if(Array.isArray(value))return '['+value.map(canonical).join(',')+']';return '{'+Object.keys(value).sort().map(k=>JSON.stringify(k)+':'+canonical(value[k])).join(',')+'}';}
 export async function compressLedger(raw){
@@ -26,10 +53,20 @@ export function errorText(error){
  if(code.includes('network-request-failed')||code.includes('unavailable'))return '連線失敗，無法確認操作是否完成。請重新載入並檢查這筆交易後再操作。';
  return error?.message||'操作失敗，請重試。';
 }
+// Same persistence order as getAuth(), so people who are already signed in stay signed in.
+function startAuth(app,authModule){
+ const Resolver=authModule.browserPopupRedirectResolver;
+ if(!authModule.initializeAuth||!Resolver||!authModule.indexedDBLocalPersistence)return authModule.getAuth(app);
+ class AfterStartResolver extends Resolver{get _shouldInitProactively(){return false;}}
+ return authModule.initializeAuth(app,{persistence:[authModule.indexedDBLocalPersistence,authModule.browserLocalPersistence,authModule.browserSessionPersistence],popupRedirectResolver:AfterStartResolver});
+}
 export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=null,fetcher=(...a)=>fetch(...a),onAuthChange=()=>{},onSyncChange=()=>{}}={}){
- const [appModule,authModule,firestoreModule]=injected||await Promise.all([import(SDK+'firebase-app.js'),import(SDK+'firebase-auth.js'),import(SDK+'firebase-firestore.js')]);
- const app=appModule.initializeApp(config,'stockbook-mobile-b'),auth=authModule.getAuth(app),db=firestoreModule.getFirestore(app);
- let baseline=null,raw=null,model=null,customNamespace='',busy=false,epoch=0,emailLoginPending=false;
+ const [appModule,authModule,firestoreModule]=injected||await Promise.all(SDK_FILES.map(url=>import(url)));
+ const app=appModule.initializeApp(config,'stockbook-mobile-b'),auth=startAuth(app,authModule),db=firestoreModule.getFirestore(app);
+ let baseline=null,raw=null,model=null,customNamespace='',busy=false,epoch=0,emailLoginPending=false,popupsWarm=false;
+ // getAuth() on a phone first loads Google's sign-in frame and only then restores the signed-in user (often a second or more).
+ // B restores the user first and loads that frame right after, so Google popups still open straight from a tap.
+ function warmPopups(){if(popupsWarm)return;popupsWarm=true;setTimeout(()=>{try{const r=auth._popupRedirectResolver;r?._initialize?.(auth)?.catch?.(()=>{});}catch{}},0);}
  // confirmed: the ledger as last read from or written to the cloud. raw/model may be ahead of it while saves are syncing.
  let confirmed=null,queued=null,flushing=null;
  const nativeAuth=createNativeAuth({auth,sdk:authModule,getEpoch:()=>epoch,getLedgerContext:()=>baseline?{ownerUid:baseline.main.ownerUid,namespace:baseline.ns}:null});
@@ -47,14 +84,28 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
    return {ns,main,chunks,payload:chunks.map(c=>c.data).join('')};
   });
  }
- async function reload({namespace=customNamespace,portfolioId=model?.portfolioId||'',account=model?.account||'all'}={}){
+ // Every writer (A's sync, B's save and B's first-use create) replaces the head document in the same atomic commit as the chunks,
+ // with a new updatedAt. So when the head is unchanged, this device's cached chunks are still the cloud chunks and need not be downloaded.
+ // A save still re-reads and compares every chunk before writing, so a stale cache can never overwrite newer cloud data.
+ async function cachedSnapshot(who,ns){
+  const c=readLedgerCache();
+  if(!c||c.uid!==who.uid||c.email!==who.email||c.shot.ns!==ns||!firestoreModule.getDoc)return null;
+  const head=await firestoreModule.getDoc(firestoreModule.doc(db,'stockLedgers',ns));
+  if(!head.exists()||canonical(head.data())!==canonical(c.shot.main))return null;
+  return {ns,main:c.shot.main,chunks:c.shot.chunks,payload:cachedPayload(c.shot)};
+ }
+ async function reload({namespace=customNamespace,portfolioId=model?.portfolioId||'',account=model?.account||'all',fresh=false}={}){
   if(busy)throw new Error('正在儲存，請稍候。');
   await idle();
-  const who=identity(),ticket=++epoch,ns=namespaceFor(who.email,namespace),shot=await readSnapshot(ns);
+  const who=identity(),ticket=++epoch,ns=namespaceFor(who.email,namespace);
+  let shot=null;
+  if(!fresh){try{shot=await cachedSnapshot(who,ns);}catch(error){if(String(error?.code||'').includes('permission-denied'))throw error;}}
+  if(!shot)shot=await readSnapshot(ns);
   const next=typeof shot.payload==='string'?await decodeLedger(shot.payload):structuredClone(shot.payload);
   const projected=projectLedger(next,who,portfolioId,account);projected.updatedAt=shot.main.updatedAt||'';
   if(ticket!==epoch||auth.currentUser?.uid!==who.uid)throw new Error('登入狀態已改變，請重新載入。');
   baseline=shot;raw=next;confirmed=next;model=projected;customNamespace=namespace;
+  writeLedgerCache(who,shot,{namespace,portfolioId:projected.portfolioId,account:projected.account});warmPopups();
   return model;
  }
  // First use: Firestore rules can't read a document that doesn't exist, so a read-then-write transaction can't tell "missing" from "denied".
@@ -89,7 +140,7 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
  // (so the screen never shows changes that are not in the cloud) and reports it through onSyncChange.
  async function commit(operation,{wait=false}={}){
   if(busy)throw new Error('正在儲存，請勿重複送出。');
-  if(!baseline||!raw||!model)throw new Error('請先載入原本的雲端帳本。');
+  if(!baseline||!raw||!model)throw new Error('正在載入最新的雲端帳本，請稍候幾秒再儲存。');
   const who=identity(),base=baseline,ticket=epoch,priorModel=model;
   if(base.ns!==namespaceFor(who.email,customNamespace))throw new Error('帳本名稱已改變，請重新載入。');
   const candidate=buildOperation(raw,who,priorModel.portfolioId,operation);
@@ -120,7 +171,7 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
     // Never leave unsaved changes on screen: fall back to the last cloud version, then try to read the newest one.
     baseline=null;
     if(confirmed){raw=confirmed;try{const who=identity();model=projectLedger(raw,who,model?.portfolioId||'',model?.account||'all');}catch{}}
-    try{await reload();}catch(error){console.error(error);}
+    try{await reload({fresh:true});}catch(error){console.error(error);}
    }
    notify({error:failure,lost});
    throw failure;
@@ -156,6 +207,7 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
   baseline={ns:base.ns,main:{...base.main,namespace:base.ns,ownerUid:who.uid,ownerEmail:who.email,updatedAt,chunkCount:chunks.length,isCompressed:true,bRevision},chunks:chunks.map((data,index)=>({index,data,ownerUid:who.uid,updatedAt})),payload};
   delete baseline.main.state;confirmed=candidate;
   if(model)model.updatedAt=updatedAt;
+  writeLedgerCache(who,baseline,{namespace:customNamespace,portfolioId:model?.portfolioId||'',account:model?.account||'all'});
  }
  // Google Drive backup uses A's existing Cloud Functions (asia-east1); the functions themselves are unchanged.
  let functions=null;
@@ -187,7 +239,7 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
    finally{emailLoginPending=false;publishAuth(auth.currentUser);}
   },
   async signIn(redirect=false){const provider=new authModule.GoogleAuthProvider();provider.setCustomParameters({prompt:'select_account'});if(redirect)return authModule.signInWithRedirect(auth,provider);return authModule.signInWithPopup(auth,provider);},
-  async signOut(){epoch++;driveAccess=null;baseline=null;raw=null;confirmed=null;model=null;return authModule.signOut(auth);},
+  async signOut(){epoch++;driveAccess=null;baseline=null;raw=null;confirmed=null;model=null;clearLedgerCache();return authModule.signOut(auth);},
   reload,commit,createLedger,idle,
   view(){return model;},
   select(portfolioId,account='all'){if(!raw)throw new Error('請先載入帳本。');model=projectLedger(raw,identity(),portfolioId,account);model.updatedAt=baseline?.main.updatedAt||'';return model;},
@@ -210,7 +262,7 @@ export async function createLedgerClient(config,{sdk:injected=null,functionsSdk=
   driveDisconnect(){return callFunction('disconnectDrive');},
   get user(){return auth.currentUser;},get namespace(){return baseline?.ns||'';},get busy(){return busy;},get syncing(){return syncing();}
  };
- function publishAuth(user){epoch++;driveAccess=null;baseline=null;raw=null;confirmed=null;model=null;onAuthChange(user,client);}
+ function publishAuth(user){if(!user){clearLedgerCache();warmPopups();}epoch++;driveAccess=null;baseline=null;raw=null;confirmed=null;model=null;onAuthChange(user,client);}
  authModule.onAuthStateChanged(auth,user=>{if(!emailLoginPending)publishAuth(user);});
  try{nativeAuth.completeRedirectReauthentication(await authModule.getRedirectResult(auth));}catch(error){onAuthChange(auth.currentUser,client,error);}
  return client;

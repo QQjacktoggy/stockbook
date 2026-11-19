@@ -180,6 +180,10 @@ button.lot{font:inherit;color:inherit;cursor:pointer}button.lot svg{width:18px;h
 .big-detail.qp-big i{font-style:normal;font-family:-apple-system,BlinkMacSystemFont,"Noto Sans CJK TC","Microsoft JhengHei",sans-serif;font-size:15px;font-weight:500;color:var(--muted);margin:0 4px}
 .big-detail.qp-big .hint{flex-basis:100%;margin-top:0;font-weight:400;letter-spacing:0}
 </style>
+<!-- Fetch every script at once instead of one import level at a time; Firebase is fetched while the app's own files load. -->
+<link rel="modulepreload" href="./app-b.js"><link rel="modulepreload" href="./cloud-client.js"><link rel="modulepreload" href="./model.js"><link rel="modulepreload" href="./legacy-engine.js"><link rel="modulepreload" href="./native-auth.js"><link rel="modulepreload" href="./drive-import.js"><link rel="modulepreload" href="./quotes.js">
+<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js" crossorigin><link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js" crossorigin><link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-lite.js" crossorigin>
+<link rel="preconnect" href="https://firestore.googleapis.com" crossorigin><link rel="preconnect" href="https://identitytoolkit.googleapis.com" crossorigin><link rel="preconnect" href="https://securetoken.googleapis.com" crossorigin>
 <script src="./firebase-config.js"></script></head>
 <body>
 <div class="app" id="app">
