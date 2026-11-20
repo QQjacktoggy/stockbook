@@ -781,3 +781,17 @@ test('A mistaken sell can be edited to fewer shares even if cash goes negative',
  assert.equal(done.appTransactions.find(t=>t.id===sell.id).shares,10);
  assert.ok(projectLedger(done,who,pid).cash['review-a']<0);
 });
+test('A mistaken borrow sell can be deleted or made smaller even if cash goes back negative',()=>{
+ const raw=fixture(),cash0=projectLedger(raw,who,pid).cash['review-a'],qty=Math.ceil((cash0+5000)/100);
+ let next=buildOperation(raw,who,pid,{kind:'upsertTransaction',fields:fields({qty,fee:0})});
+ const buy=next.appTransactions.at(-1),negative=projectLedger(next,who,pid).cash['review-a'];assert.ok(negative<0);
+ next=buildOperation(next,who,pid,{kind:'upsertTransaction',fields:fields({type:'sell',borrow:'sell',qty,price:110,fee:0,tax:0,sources:buy.id})});
+ const borrow=next.appTransactions.at(-1);
+ assert.equal(borrow.borrowRebuyType,'BORROW_SELL');assert.ok(projectLedger(next,who,pid).cash['review-a']>0);
+ const deleted=buildOperation(next,who,pid,{kind:'deleteTransaction',id:borrow.id});
+ assert.ok(!deleted.appTransactions.some(t=>t.id===borrow.id));
+ assert.equal(Math.round(projectLedger(deleted,who,pid).cash['review-a']),Math.round(negative));
+ const smaller=buildOperation(next,who,pid,{kind:'upsertTransaction',id:borrow.id,fields:fields({type:'sell',borrow:'sell',qty:10,price:110,fee:0,tax:0,sources:buy.id})});
+ assert.equal(smaller.appTransactions.find(t=>t.id===borrow.id).shares,10);
+ assert.ok(projectLedger(smaller,who,pid).cash['review-a']<0);
+});
